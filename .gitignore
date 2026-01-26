@@ -1,0 +1,8 @@
+node_modules/ 
+.next/ 
+database.db 
+uploads/ 
+.env 
+__pycache__/ 
+venv/ 
+"*.db" 
