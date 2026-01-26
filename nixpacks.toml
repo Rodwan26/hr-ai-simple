@@ -1,6 +1,6 @@
 [phases.install]
 cmds = [
-  'python -m venv /opt/venv',
+  'python3 -m venv /opt/venv',
   '. /opt/venv/bin/activate && pip install -r backend/requirements.txt'
 ]
 
