@@ -9,3 +9,4 @@ class LeavePolicy(Base):
     max_days_per_year = Column(Float)
     requires_approval = Column(Boolean, default=True)
     auto_approve_threshold_days = Column(Float, default=2.0) # Requests <= this days can be auto-approved
+    description = Column(String, nullable=True)

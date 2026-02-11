@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
-from app.models.company import Company
+from app.models.organization import Organization
 from app.services.document_ai import process_uploaded_file, query_documents, delete_document
 from datetime import datetime
 import os
@@ -14,7 +14,13 @@ import time
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+from app.routers.auth_deps import require_role, require_any_role, get_current_user, get_current_org
+from app.models.user import UserRole, User
+from app.services.audit import AuditService
+from app.services.ai_trust_service import AITrustService
+from app.schemas.trust import TrustedAIResponse, TrustMetadata
+
+router = APIRouter(prefix="/documents", tags=["documents"])
 
 class DocumentResponse(BaseModel):
     id: int
@@ -23,14 +29,13 @@ class DocumentResponse(BaseModel):
     file_type: str
     upload_date: datetime
     uploaded_by: Optional[str]
-    company_id: int
+    organization_id: Optional[int]
     
     class Config:
         from_attributes = True
 
 class DocumentQueryRequest(BaseModel):
     question: str
-    company_id: int
     document_ids: Optional[List[int]] = None
 
 class DocumentQueryResponse(BaseModel):
@@ -47,25 +52,15 @@ class ChunkResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# Default company ID (for single-tenant setup)
-DEFAULT_COMPANY_ID = 1
-
-def get_or_create_default_company(db: Session) -> Company:
-    """Get or create default company."""
-    company = db.query(Company).filter(Company.id == DEFAULT_COMPANY_ID).first()
-    if not company:
-        company = Company(id=DEFAULT_COMPANY_ID, name="Default Company")
-        db.add(company)
-        db.commit()
-        db.refresh(company)
-    return company
+# Multi-tenancy is now enforced via current_user.organization_id.
+# Legacy helper get_or_create_default_company removed.
 
 @router.post("/upload", response_model=DocumentResponse)
 async def upload_document(
     file: UploadFile = File(...),
-    company_id: int = Form(DEFAULT_COMPANY_ID),
-    uploaded_by: str = Form("system"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_STAFF]))
 ):
     """
     Upload a company document (PDF, DOCX, TXT, CSV).
@@ -75,23 +70,29 @@ async def upload_document(
     logger.info("DOCUMENT UPLOAD REQUEST RECEIVED")
     logger.info(f"Filename: {file.filename}")
     logger.info(f"Content type: {file.content_type if hasattr(file, 'content_type') else 'unknown'}")
-    logger.info(f"Company ID: {company_id}, Uploaded by: {uploaded_by}")
+    logger.info(f"Company ID: {current_user.organization_id}, Uploaded by: {current_user.email}")
     logger.info("=" * 60)
     
     try:
-        # Ensure company exists
-        logger.info("Ensuring company exists...")
-        get_or_create_default_company(db)
-        logger.info("Company verified/created")
-        
-        # Process file
-        document = await process_uploaded_file(file, company_id, uploaded_by, db)
+        # Process file for organization
+        document = await process_uploaded_file(file, org_id, current_user.email, db)
         
         upload_time = time.time() - upload_start
         logger.info("=" * 60)
         logger.info(f"UPLOAD SUCCESSFUL - Document ID: {document.id}")
         logger.info(f"Total upload time: {upload_time:.2f}s")
         logger.info("=" * 60)
+        
+        # Audit logging
+        AuditService.log(
+            db,
+            action="upload_document",
+            entity_type="document",
+            entity_id=document.id,
+            user_id=current_user.id,
+            user_role=current_user.role,
+            details={"filename": file.filename, "company_id": org_id}
+        )
         
         return document
         
@@ -113,66 +114,122 @@ async def upload_document(
         logger.error("=" * 60)
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
-@router.post("/query", response_model=DocumentQueryResponse)
+@router.post("/query", response_model=TrustedAIResponse)
 def query_document(
     request: DocumentQueryRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_any_role)
 ):
     """
     Ask a question about company documents using RAG.
+    Returns a trusted, audited AI response.
     """
     try:
+        # 1. Provide Organization Context
+        trust_service = AITrustService(
+            db, 
+            organization_id=org_id,
+            user_id=current_user.id,
+            user_role=current_user.role
+        )
+
+        # 2. Call AI Logic
         result = query_documents(
             request.question,
-            request.company_id,
+            org_id,
             db,
             top_k=5,
             document_ids=request.document_ids
         )
-        return result
+        
+        # 3. Extract metadata from AI result
+        trust_obj: TrustMetadata = result.get("trust_metadata_obj")
+        if not trust_obj:
+            # Should not happen given previous refactor, but safety first
+            trust_obj = TrustMetadata.fallback("Internal error: AI metadata missing")
+            return trust_service.wrap_and_log(
+                content=result.get("answer", "Error"),
+                action_type="query_document",
+                entity_type="document",
+                is_fallback=True,
+                fallback_reason="Metadata missing"
+            )
+
+        # 4. Wrap and Log via Trust Service
+        # This handles Audit Logging automatically
+        return trust_service.wrap_and_log(
+            content=result["answer"],
+            action_type="query_document",
+            entity_type="document",
+            entity_id=None, # or maybe the first source doc id?
+            confidence_score=trust_obj.confidence_score,
+            sources=trust_obj.sources,
+            model_name=trust_obj.ai_model,
+            reasoning=trust_obj.reasoning,
+            is_fallback=trust_obj.is_fallback,
+            fallback_reason=trust_obj.fallback_reason,
+            details={"question": request.question}
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error querying documents: {str(e)}")
 
 @router.get("", response_model=List[DocumentResponse])
 def list_documents(
-    company_id: int = DEFAULT_COMPANY_ID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_any_role)
 ):
     """
-    List all documents for a company.
+    List all documents for the user's organization.
     """
     documents = db.query(Document).filter(
-        Document.company_id == company_id
+        Document.organization_id == org_id
     ).order_by(Document.upload_date.desc()).all()
     return documents
 
 @router.delete("/{document_id}")
 def delete_document_endpoint(
     document_id: int,
-    company_id: int = DEFAULT_COMPANY_ID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN]))
 ):
     """
-    Delete a document and all its chunks.
+    Delete a document and all its chunks within organization.
     """
-    success = delete_document(document_id, company_id, db)
+    success = delete_document(document_id, org_id, db)
     if not success:
         raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Audit logging
+    AuditService.log(
+        db,
+        action="delete_document",
+        entity_type="document",
+        entity_id=document_id,
+        user_id=current_user.id,
+        user_role=current_user.role,
+        details={"document_id": document_id, "company_id": org_id}
+    )
+    
     return {"message": "Document deleted successfully"}
 
 @router.get("/{document_id}/chunks", response_model=List[ChunkResponse])
 def get_document_chunks(
     document_id: int,
-    company_id: int = DEFAULT_COMPANY_ID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(get_current_user)
 ):
     """
-    Get all chunks for a document.
+    Get all chunks for a document within the user's organization.
     """
-    # Verify document belongs to company
+    # Verify document belongs to user's organization
     document = db.query(Document).filter(
         Document.id == document_id,
-        Document.company_id == company_id
+        Document.organization_id == org_id
     ).first()
     
     if not document:

@@ -149,8 +149,8 @@ export default function BurnoutPage() {
                     <div className="bg-white shadow rounded-lg p-6 border-l-4 border-purple-500">
                         <div className="flex justify-between items-start">
                             <h2 className="text-lg font-medium text-gray-900">AI Risk Assessment</h2>
-                            <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${getRiskColor(dashboardData?.assessment?.risk_level || 'unknown')}`}>
-                                {dashboardData?.assessment?.risk_level?.toUpperCase() || 'UNKNOWN'}
+                            <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${getRiskColor(dashboardData?.assessment?.support_priority || 'unknown')}`}>
+                                {dashboardData?.assessment?.support_priority?.toUpperCase() || 'UNKNOWN'}
                             </span>
                         </div>
 

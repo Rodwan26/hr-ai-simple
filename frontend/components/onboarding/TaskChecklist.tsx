@@ -3,7 +3,8 @@
 
 import { useMemo, useState } from 'react'
 import type { OnboardingTask, OnboardingTaskCategory } from '@/lib/api'
-import { completeOnboardingTask, createOnboardingTask, deleteOnboardingTask } from '@/lib/api'
+import { completeOnboardingTask, createOnboardingTask, deleteOnboardingTask, ApiError } from '@/lib/api'
+import { ErrorDisplay } from '@/lib/error-utils'
 
 const categoryMeta: Record<OnboardingTaskCategory, { label: string; icon: string; color: string }> = {
   documentation: { label: 'Documentation', icon: '📄', color: 'bg-purple-50 border-purple-200' },
@@ -30,6 +31,7 @@ export function TaskChecklist({
   const [newDueDate, setNewDueDate] = useState<string>('')
   const [busyTaskId, setBusyTaskId] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<any>(null)
 
   const filtered = useMemo(() => {
     return tasks.filter((t) => {
@@ -52,8 +54,11 @@ export function TaskChecklist({
     if (task.is_completed) return
     setBusyTaskId(task.id)
     try {
+      setError(null)
       await completeOnboardingTask(task.id)
       await onChanged()
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : e.message)
     } finally {
       setBusyTaskId(null)
     }
@@ -63,8 +68,11 @@ export function TaskChecklist({
     if (!confirm('Delete this task?')) return
     setBusyTaskId(task.id)
     try {
+      setError(null)
       await deleteOnboardingTask(task.id)
       await onChanged()
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : e.message)
     } finally {
       setBusyTaskId(null)
     }
@@ -74,6 +82,7 @@ export function TaskChecklist({
     if (!newTitle.trim() || !newDesc.trim()) return
     setBusy(true)
     try {
+      setError(null)
       await createOnboardingTask(employeeId, {
         task_title: newTitle.trim(),
         task_description: newDesc.trim(),
@@ -86,6 +95,8 @@ export function TaskChecklist({
       setNewDueDate('')
       setAdding(false)
       await onChanged()
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : e.message)
     } finally {
       setBusy(false)
     }
@@ -121,6 +132,8 @@ export function TaskChecklist({
           {adding ? 'Close' : '+ Add Task'}
         </button>
       </div>
+
+      <ErrorDisplay errors={error} />
 
       {adding && (
         <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">

@@ -11,4 +11,6 @@ class Document(Base):
     file_type = Column(String)
     upload_date = Column(DateTime(timezone=True), server_default=func.now())
     uploaded_by = Column(String, nullable=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), index=True)
+    version = Column(String, nullable=True, default="1.0")  # Document version for citations
+

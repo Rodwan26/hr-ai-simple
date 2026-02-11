@@ -1,13 +1,12 @@
-'use client'
-
 import { useEffect, useState } from 'react'
 import type { OnboardingTips } from '@/lib/api'
-import { getOnboardingTips } from '@/lib/api'
+import { getOnboardingTips, ApiError } from '@/lib/api'
+import { ErrorDisplay } from '@/lib/error-utils'
 
 export function TipsCard({ employeeId }: { employeeId: number }) {
   const [tips, setTips] = useState<OnboardingTips | null>(null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<any>(null)
 
   async function load() {
     setLoading(true)
@@ -15,8 +14,8 @@ export function TipsCard({ employeeId }: { employeeId: number }) {
     try {
       const t = await getOnboardingTips(employeeId)
       setTips(t)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load tips')
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : (e.message || 'Failed to load tips'))
     } finally {
       setLoading(false)
     }
@@ -40,7 +39,7 @@ export function TipsCard({ employeeId }: { employeeId: number }) {
         </button>
       </div>
 
-      {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
+      <ErrorDisplay errors={error} className="mt-3" />
 
       {!tips && !loading ? (
         <div className="mt-3 text-sm text-gray-600">No tips available.</div>

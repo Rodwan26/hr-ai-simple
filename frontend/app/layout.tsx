@@ -1,8 +1,8 @@
-import type { Metadata } from 'next'
 import './globals.css'
-import Link from 'next/link'
+import { AuthProvider } from '@/lib/auth-context'
+import { AppShell } from './components/AppShell'
 
-export const metadata: Metadata = {
+export const metadata = {
   title: 'HR AI Platform',
   description: 'AI-powered HR management platform',
 }
@@ -15,75 +15,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <nav className="bg-white shadow-sm border-b border-gray-200">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between h-16">
-              <div className="flex">
-                <div className="flex-shrink-0 flex items-center">
-                  <h1 className="text-xl font-bold text-gray-800">HR AI Platform</h1>
-                </div>
-                <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                  <Link
-                    href="/"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Help Desk
-                  </Link>
-                  <Link
-                    href="/resumes"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Resume Screening
-                  </Link>
-                  <Link
-                    href="/risk"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Risk Detection
-                  </Link>
-                  <Link
-                    href="/interviews"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Interview Scheduling
-                  </Link>
-                  <Link
-                    href="/documents"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Documents
-                  </Link>
-                  <Link
-                    href="/onboarding"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Onboarding
-                  </Link>
-                  <Link
-                    href="/leave"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Leave Management
-                  </Link>
-                  <Link
-                    href="/burnout"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Burnout Detection
-                  </Link>
-                  <Link
-                    href="/payroll"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Payroll
-                  </Link>
-                </div>
-              </div>
-            </div>
-          </div>
-        </nav>
-        {children}
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
-  )
+  );
 }

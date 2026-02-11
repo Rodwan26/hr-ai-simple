@@ -13,5 +13,6 @@ class BurnoutAssessment(Base):
     ai_analysis = Column(String)
     recommendations = Column(JSON)  # List of recommendations
     assessed_at = Column(DateTime, default=datetime.now)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
 
     employee = relationship("Employee", backref="burnout_assessments")

@@ -1,5 +1,5 @@
 import hashlib
-import numpy as np
+import math
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.models.document_chunk import DocumentChunk
@@ -65,20 +65,24 @@ def _fallback_embedding(text: str) -> List[float]:
     
     return embedding[:EMBEDDING_DIM]
 
+import math
+
 def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """Calculate cosine similarity between two vectors."""
-    vec1 = np.array(vec1)
-    vec2 = np.array(vec2)
-    dot_product = np.dot(vec1, vec2)
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
+    """Calculate cosine similarity between two vectors using pure Python."""
+    if not vec1 or not vec2:
+        return 0.0
+    
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = math.sqrt(sum(a * a for a in vec1))
+    norm2 = math.sqrt(sum(b * b for b in vec2))
+    
     if norm1 == 0 or norm2 == 0:
         return 0.0
     return float(dot_product / (norm1 * norm2))
 
 def semantic_search(
     query_embedding: List[float],
-    company_id: int,
+    organization_id: int,
     db: Session,
     top_k: int = 5,
     document_ids: Optional[List[int]] = None
@@ -98,8 +102,8 @@ def semantic_search(
     """
     from app.models.document import Document
     
-    # Get all chunks for the company
-    query = db.query(DocumentChunk).join(Document).filter(Document.company_id == company_id)
+    # Get all chunks for the organization
+    query = db.query(DocumentChunk).join(Document).filter(Document.organization_id == organization_id)
     
     if document_ids:
         query = query.filter(DocumentChunk.document_id.in_(document_ids))
@@ -126,7 +130,7 @@ def semantic_search(
 def hybrid_search(
     query_text: str,
     query_embedding: List[float],
-    company_id: int,
+    organization_id: int,
     db: Session,
     top_k: int = 5
 ) -> List[dict]:
@@ -144,7 +148,7 @@ def hybrid_search(
         List of results with combined scores
     """
     # Semantic search
-    semantic_results = semantic_search(query_embedding, company_id, db, top_k * 2)
+    semantic_results = semantic_search(query_embedding, organization_id, db, top_k * 2)
     
     # Keyword search (simple text matching)
     from app.models.document import Document
@@ -152,7 +156,7 @@ def hybrid_search(
     
     keyword_results = []
     chunks = db.query(DocumentChunk).join(Document).filter(
-        Document.company_id == company_id
+        Document.organization_id == organization_id
     ).all()
     
     for chunk in chunks:

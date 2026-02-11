@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from fastapi import UploadFile
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
-from app.models.company import Company
+from app.models.organization import Organization
 from app.services.embedding_service import generate_embeddings, hybrid_search
 import hashlib
 import re
@@ -94,7 +94,7 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 async def process_uploaded_file(
     file: UploadFile,
-    company_id: int,
+    organization_id: int,
     uploaded_by: str,
     db: Session,
     upload_dir: str = "uploads"
@@ -105,7 +105,7 @@ async def process_uploaded_file(
     process_start = time.time()
     logger.info(f"=== Starting file upload process ===")
     logger.info(f"Filename: {file.filename}")
-    logger.info(f"Company ID: {company_id}, Uploaded by: {uploaded_by}")
+    logger.info(f"Organization ID: {organization_id}, Uploaded by: {uploaded_by}")
     
     try:
         # Step 1: Validate file
@@ -118,14 +118,14 @@ async def process_uploaded_file(
         
         # Step 2: Create upload directory
         logger.info("Step 2: Creating upload directory...")
-        company_upload_dir = os.path.join(upload_dir, str(company_id))
-        os.makedirs(company_upload_dir, exist_ok=True)
-        logger.info(f"Step 2: Upload directory ready: {company_upload_dir}")
+        org_upload_dir = os.path.join(upload_dir, str(organization_id))
+        os.makedirs(org_upload_dir, exist_ok=True)
+        logger.info(f"Step 2: Upload directory ready: {org_upload_dir}")
         
         # Step 3: Prepare file path
         file_ext = os.path.splitext(file.filename)[1].lower()
-        file_hash = hashlib.md5(f"{file.filename}{company_id}".encode()).hexdigest()
-        file_path = os.path.join(company_upload_dir, f"{file_hash}{file_ext}")
+        file_hash = hashlib.md5(f"{file.filename}{organization_id}".encode()).hexdigest()
+        file_path = os.path.join(org_upload_dir, f"{file_hash}{file_ext}")
         logger.info(f"Step 3: File path prepared: {file_path}")
         
         # Step 4: Read and save file
@@ -180,7 +180,7 @@ async def process_uploaded_file(
             file_path=file_path,
             file_type=file_ext,
             uploaded_by=uploaded_by,
-            company_id=company_id
+            organization_id=organization_id
         )
         db.add(document)
         db.flush()
@@ -325,31 +325,38 @@ async def process_uploaded_file(
 
 def query_documents(
     question: str,
-    company_id: int,
+    organization_id: int,
     db: Session,
     top_k: int = 5,
     document_ids: Optional[List[int]] = None
 ) -> Dict:
-    """Query documents using RAG."""
+    """Query documents using RAG with enterprise trust metadata."""
     from app.services.embedding_service import generate_embeddings, hybrid_search
+    from app.schemas.trust import TrustMetadata, SourceCitation, ConfidenceLevel
     
     query_embeddings = generate_embeddings([question], db)
     query_embedding = query_embeddings[0] if query_embeddings else None
     
     if not query_embedding:
+        # Fallback: Unable to process
+        trust = TrustMetadata.fallback("Unable to process your query. Please try again.")
         return {
-            "answer": "Unable to process query.",
+            "answer": trust.fallback_reason,
             "sources": [],
-            "confidence": 0.0
+            "confidence": 0.0,
+            "trust": trust.model_dump()
         }
     
-    results = hybrid_search(question, query_embedding, company_id, db, top_k)
+    results = hybrid_search(question, query_embedding, organization_id, db, top_k)
     
     if not results:
+        # Fallback: No relevant information
+        trust = TrustMetadata.fallback("I couldn't find this information in the available documents.")
         return {
-            "answer": "No relevant information found in documents.",
+            "answer": trust.fallback_reason,
             "sources": [],
-            "confidence": 0.0
+            "confidence": 0.0,
+            "trust": trust.model_dump()
         }
     
     from app.models.document import Document
@@ -359,22 +366,40 @@ def query_documents(
     for result in results:
         doc = db.query(Document).filter(Document.id == result["document_id"]).first()
         if doc:
+            # Include snippet (first 200 chars of chunk)
+            snippet = result.get("chunk_text", "")[:200] + "..." if len(result.get("chunk_text", "")) > 200 else result.get("chunk_text", "")
+            
+            # Include version info (with upload date fallback)
+            version = doc.version if hasattr(doc, 'version') and doc.version else f"Uploaded {doc.upload_date.strftime('%Y-%m-%d')}"
+            
             sources.append({
                 "document_id": doc.id,
                 "filename": doc.filename,
                 "chunk_index": result["chunk_index"],
                 "similarity": result.get("similarity", 0.0),
-                "combined_score": result.get("combined_score", 0.0)
+                "combined_score": result.get("combined_score", 0.0),
+                "snippet": snippet,
+                "version": version
             })
             context_chunks.append(result["chunk_text"])
     
     answer, confidence = generate_rag_answer(question, context_chunks)
     
+    # Build trust metadata object locally
+    trust = TrustMetadata.from_score(
+        score=confidence,
+        model="RAG-Enterprise",
+        reasoning=f"Answer synthesized from {len(sources)} document chunk(s).",
+        sources=[SourceCitation(**s) for s in sources]
+    )
+    
     return {
         "answer": answer,
         "sources": sources,
-        "confidence": confidence
+        "confidence": confidence,
+        "trust_metadata_obj": trust # Pass the object back for the service to use
     }
+
 
 def generate_rag_answer(question: str, context_chunks: List[str]) -> tuple[str, float]:
     """Generate answer using RAG with OpenRouter."""
@@ -403,11 +428,11 @@ def generate_rag_answer(question: str, context_chunks: List[str]) -> tuple[str, 
     except Exception as e:
         return f"Error generating answer: {str(e)}", 0.0
 
-def delete_document(document_id: int, company_id: int, db: Session) -> bool:
-    """Delete a document and all its chunks."""
+def delete_document(document_id: int, organization_id: int, db: Session) -> bool:
+    """Delete a document and all its chunks within organization scope."""
     document = db.query(Document).filter(
         Document.id == document_id,
-        Document.company_id == company_id
+        Document.organization_id == organization_id
     ).first()
     
     if not document:

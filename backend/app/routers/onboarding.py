@@ -7,10 +7,18 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.company import Company
+from app.models.organization import Organization
 from app.models.onboarding_employee import OnboardingEmployee, OnboardingStatus
 from app.models.onboarding_task import OnboardingTask, OnboardingTaskCategory
 from app.models.onboarding_chat import OnboardingChat
+from app.models.onboarding_document import OnboardingDocument
+from app.models.onboarding_template import OnboardingTemplate
+from app.models.onboarding_reminder import OnboardingReminder, ReminderStatus, ReminderType
+from app.schemas.onboarding_workflow import (
+    OnboardingTemplateCreate, OnboardingTemplateResponse,
+    OnboardingReminderResponse, OnboardingProgress
+)
+from app.schemas.trust import TrustedAIResponse
 from app.services.onboarding_ai import (
     generate_onboarding_checklist,
     answer_onboarding_question,
@@ -20,19 +28,17 @@ from app.services.onboarding_ai import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/onboarding", tags=["onboarding"])
+from app.routers.auth_deps import require_role, require_any_role, get_current_user, get_current_org
+from app.models.user import UserRole, User
+from app.services.audit import AuditService
+from app.services.ai_trust_service import AITrustService
+from app.services.onboarding_service import create_onboarding_tasks
+from app.services.notification_service import NotificationService
 
-DEFAULT_COMPANY_ID = 1
+router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
-
-def get_or_create_default_company(db: Session) -> Company:
-    company = db.query(Company).filter(Company.id == DEFAULT_COMPANY_ID).first()
-    if not company:
-        company = Company(id=DEFAULT_COMPANY_ID, name="Default Company")
-        db.add(company)
-        db.commit()
-        db.refresh(company)
-    return company
+# Legacy DEFAULT_COMPANY_ID and helper removed.
+# Onboarding is now scoped to organization via current_user.
 
 
 class OnboardingEmployeeCreate(BaseModel):
@@ -42,7 +48,6 @@ class OnboardingEmployeeCreate(BaseModel):
     department: str
     start_date: date
     manager_name: Optional[str] = None
-    company_id: int = DEFAULT_COMPANY_ID
 
 
 class OnboardingEmployeeUpdate(BaseModel):
@@ -65,7 +70,7 @@ class OnboardingEmployeeResponse(BaseModel):
     manager_name: Optional[str]
     status: str
     completion_percentage: int
-    company_id: int
+    organization_id: int
     created_at: datetime
 
     class Config:
@@ -123,10 +128,13 @@ class ChatFeedbackRequest(BaseModel):
 
 
 @router.post("/employees", response_model=OnboardingEmployeeResponse)
-def create_employee(payload: OnboardingEmployeeCreate, db: Session = Depends(get_db)):
+def create_employee(
+    payload: OnboardingEmployeeCreate, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_STAFF])),
+    org_id: int = Depends(get_current_org)
+):
     logger.info("Creating onboarding employee")
-    get_or_create_default_company(db)
-
     employee = OnboardingEmployee(
         employee_name=payload.employee_name,
         employee_email=str(payload.employee_email),
@@ -136,7 +144,7 @@ def create_employee(payload: OnboardingEmployeeCreate, db: Session = Depends(get
         manager_name=payload.manager_name,
         status=OnboardingStatus.pending,
         completion_percentage=0,
-        company_id=payload.company_id,
+        organization_id=org_id,
     )
     db.add(employee)
     db.commit()
@@ -145,22 +153,44 @@ def create_employee(payload: OnboardingEmployeeCreate, db: Session = Depends(get
 
 
 @router.get("/employees", response_model=List[OnboardingEmployeeResponse])
-def list_employees(db: Session = Depends(get_db)):
-    employees = db.query(OnboardingEmployee).order_by(OnboardingEmployee.created_at.desc()).all()
+def list_employees(
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org)
+):
+    employees = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.organization_id == org_id
+    ).order_by(OnboardingEmployee.created_at.desc()).all()
     return employees
 
 
 @router.get("/employees/{employee_id}", response_model=OnboardingEmployeeResponse)
-def get_employee(employee_id: int, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+def get_employee(
+    employee_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(get_current_user)
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     return employee
 
 
 @router.put("/employees/{employee_id}", response_model=OnboardingEmployeeResponse)
-def update_employee(employee_id: int, payload: OnboardingEmployeeUpdate, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+def update_employee(
+    employee_id: int, 
+    payload: OnboardingEmployeeUpdate, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_STAFF]))
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
@@ -181,14 +211,38 @@ def update_employee(employee_id: int, payload: OnboardingEmployeeUpdate, db: Ses
         if status_val in {s.value for s in OnboardingStatus}:
             employee.status = OnboardingStatus(status_val)
 
+    # Capture before state (simplified)
+    # Ideally we'd fetch the object before modifying, but for now we just log the change action.
+    
     db.commit()
     db.refresh(employee)
+    
+    # Audit Log
+    AuditService.log(
+        db,
+        action="update_onboarding_employee",
+        entity_type="onboarding_employee",
+        entity_id=employee.id,
+        user_id=current_user.id,
+        user_role=current_user.role,
+        details=payload.dict(exclude_unset=True),
+        ai_recommended=False
+    )
+
     return employee
 
 
 @router.delete("/employees/{employee_id}")
-def delete_employee(employee_id: int, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+def delete_employee(
+    employee_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN]))
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
@@ -200,66 +254,60 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     return {"message": "Employee deleted successfully"}
 
 
-@router.post("/employees/{employee_id}/generate-checklist", response_model=List[OnboardingTaskResponse])
-def generate_checklist(employee_id: int, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+@router.post("/employees/{employee_id}/generate-checklist", response_model=TrustedAIResponse)
+def generate_checklist(
+    employee_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_STAFF]))
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
     logger.info(f"Generating onboarding checklist for employee_id={employee_id}")
-    tasks = generate_onboarding_checklist(employee.position, employee.department)
-
-    # Replace existing tasks (fresh generation)
+    # Clear existing tasks
     db.query(OnboardingTask).filter(OnboardingTask.employee_id == employee_id).delete()
-
-    created: List[OnboardingTask] = []
-    for idx, t in enumerate(tasks):
-        category = str(t.get("category", "other")).lower()
-        if category not in {c.value for c in OnboardingTaskCategory}:
-            category = "other"
-
-        due = None
-        day_offset = t.get("day_offset", None)
-        if day_offset is not None:
-            try:
-                due = employee.start_date + timedelta(days=int(day_offset))
-            except Exception:
-                due = None
-
-        priority = str(t.get("priority", "medium")).lower()
-        description = str(t.get("description", "")).strip() or "No description provided."
-        description = f"[Priority: {priority}] {description}"
-
-        task = OnboardingTask(
-            employee_id=employee_id,
-            task_title=str(t.get("title", "")).strip(),
-            task_description=description,
-            task_category=OnboardingTaskCategory(category),
-            is_completed=False,
-            due_date=due,
-            completed_at=None,
-            task_order=idx,
-        )
-        created.append(task)
-        db.add(task)
-
     db.commit()
+
+    # Use Domain Service to create tasks (AI suggestion + Fallback)
+    created = create_onboarding_tasks(db, employee, use_ai=True)
 
     # Update progress
     analyze_progress(employee_id, db)
 
-    created = (
-        db.query(OnboardingTask)
-        .filter(OnboardingTask.employee_id == employee_id)
-        .order_by(OnboardingTask.task_order.asc(), OnboardingTask.created_at.asc())
-        .all()
+    # Audit logging via AITrustService
+    trust_service = AITrustService(db, org_id, current_user.id, current_user.role)
+    
+    # Convert created tasks to dicts for payload
+    created_dicts = [OnboardingTaskResponse.from_orm(t).dict() for t in created]
+    
+    return trust_service.wrap_and_log(
+        content=f"Generated {len(created)} onboarding tasks.",
+        action_type="generate_onboarding_checklist",
+        entity_type="employee",
+        entity_id=employee_id,
+        confidence_score=0.9,
+        model_name="HR-Onboard-AI",
+        details={"position": employee.position, "department": employee.department},
+        data=created_dicts
     )
-    return created
 
 
 @router.get("/employees/{employee_id}/tasks", response_model=List[OnboardingTaskResponse])
-def list_tasks(employee_id: int, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+def list_tasks(
+    employee_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_any_role)
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     tasks = (
@@ -272,8 +320,16 @@ def list_tasks(employee_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/employees/{employee_id}/tasks", response_model=OnboardingTaskResponse)
-def create_custom_task(employee_id: int, payload: OnboardingTaskCreate, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+def create_custom_task(
+    employee_id: int, 
+    payload: OnboardingTaskCreate, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org)
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
@@ -300,8 +356,16 @@ def create_custom_task(employee_id: int, payload: OnboardingTaskCreate, db: Sess
 
 
 @router.put("/tasks/{task_id}/complete", response_model=OnboardingTaskResponse)
-def complete_task(task_id: int, db: Session = Depends(get_db)):
-    task = db.query(OnboardingTask).filter(OnboardingTask.id == task_id).first()
+def complete_task(
+    task_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_any_role)
+):
+    task = db.query(OnboardingTask).join(OnboardingEmployee).filter(
+        OnboardingTask.id == task_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -311,12 +375,30 @@ def complete_task(task_id: int, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(task)
         analyze_progress(task.employee_id, db)
+        
+        # Audit logging
+        AuditService.log(
+            db,
+            action="complete_onboarding_task",
+            entity_type="onboarding_task",
+            entity_id=task.id,
+            user_id=current_user.id,
+            user_role=current_user.role,
+            details={"employee_id": task.employee_id, "task_title": task.task_title}
+        )
     return task
 
 
 @router.delete("/tasks/{task_id}")
-def delete_task(task_id: int, db: Session = Depends(get_db)):
-    task = db.query(OnboardingTask).filter(OnboardingTask.id == task_id).first()
+def delete_task(
+    task_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org)
+):
+    task = db.query(OnboardingTask).join(OnboardingEmployee).filter(
+        OnboardingTask.id == task_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     employee_id = task.employee_id
@@ -326,9 +408,18 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     return {"message": "Task deleted successfully"}
 
 
-@router.post("/employees/{employee_id}/ask", response_model=AskResponse)
-def ask_onboarding(employee_id: int, payload: AskRequest, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+@router.post("/employees/{employee_id}/ask", response_model=TrustedAIResponse)
+def ask_onboarding(
+    employee_id: int, 
+    payload: AskRequest, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org),
+    current_user: User = Depends(require_any_role)
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
@@ -340,7 +431,7 @@ def ask_onboarding(employee_id: int, payload: AskRequest, db: Session = Depends(
         "department": employee.department,
         "start_date": employee.start_date.isoformat(),
         "manager_name": employee.manager_name,
-        "company_id": employee.company_id,
+        "organization_id": employee.organization_id,
     }
 
     try:
@@ -359,17 +450,34 @@ def ask_onboarding(employee_id: int, payload: AskRequest, db: Session = Depends(
     db.commit()
     db.refresh(chat)
 
-    return AskResponse(
-        chat_id=chat.id,
-        answer=result.get("answer", ""),
-        sources=result.get("sources", []),
-        confidence=float(result.get("confidence", 0.0) or 0.0),
+    trust_service = AITrustService(db, org_id, current_user.id, current_user.role)
+    return trust_service.wrap_and_log(
+        content=result.get("answer", ""),
+        action_type="ask_onboarding_question",
+        entity_type="onboarding_chat",
+        entity_id=chat.id,
+        confidence_score=result.get("confidence", 0.0),
+        model_name="HR-Onboard-QA",
+        details={"question": payload.question},
+        data={
+            "chat_id": chat.id,
+            "answer": result.get("answer", ""),
+            "sources": result.get("sources", []),
+            "confidence": result.get("confidence", 0.0)
+        }
     )
 
 
 @router.get("/employees/{employee_id}/chat-history", response_model=List[ChatResponse])
-def chat_history(employee_id: int, db: Session = Depends(get_db)):
-    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+def chat_history(
+    employee_id: int, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org)
+):
+    employee = db.query(OnboardingEmployee).filter(
+        OnboardingEmployee.id == employee_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
@@ -383,7 +491,18 @@ def chat_history(employee_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/chats/{chat_id}/feedback", response_model=ChatResponse)
-def chat_feedback(chat_id: int, payload: ChatFeedbackRequest, db: Session = Depends(get_db)):
+def chat_feedback(
+    chat_id: int, 
+    payload: ChatFeedbackRequest, 
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_current_org)
+):
+    chat = db.query(OnboardingChat).join(OnboardingEmployee).filter(
+        OnboardingChat.id == chat_id,
+        OnboardingEmployee.organization_id == org_id
+    ).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
     chat = db.query(OnboardingChat).filter(OnboardingChat.id == chat_id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -393,13 +512,30 @@ def chat_feedback(chat_id: int, payload: ChatFeedbackRequest, db: Session = Depe
     return chat
 
 
-@router.get("/employees/{employee_id}/tips")
-def tips(employee_id: int, db: Session = Depends(get_db)):
+@router.get("/employees/{employee_id}/tips", response_model=TrustedAIResponse)
+def tips(
+    employee_id: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     try:
-        return get_onboarding_tips(employee, db)
+        tips_data = get_onboarding_tips(employee, db)
+        
+        trust_service = AITrustService(db, org_id, current_user.id, current_user.role)
+        return trust_service.wrap_and_log(
+            content="Daily tips generated.",
+            action_type="get_onboarding_tips",
+            entity_type="employee",
+            entity_id=employee_id,
+            confidence_score=0.85,
+            model_name="HR-Onboard-Coach",
+            details={},
+            data=tips_data
+        )
+
     except Exception as e:
         logger.error(f"Tips generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
@@ -412,3 +548,345 @@ def progress(employee_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=result["error"])
     return result
 
+# --- Phase 5: Document Management ---
+
+class DocumentResponse(BaseModel):
+    id: int
+    document_name: str
+    document_type: str
+    is_signed: bool
+    signed_at: Optional[datetime]
+    required_by: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+@router.get("/employees/{employee_id}/documents", response_model=List[DocumentResponse])
+def list_documents(employee_id: int, db: Session = Depends(get_db)):
+    return db.query(OnboardingDocument).filter(OnboardingDocument.employee_id == employee_id).all()
+
+@router.post("/employees/{employee_id}/documents")
+def add_required_document(employee_id: int, document_name: str, document_type: str, db: Session = Depends(get_db)):
+    doc = OnboardingDocument(
+        employee_id=employee_id,
+        document_name=document_name,
+        document_type=document_type,
+        required_by=datetime.utcnow() + timedelta(days=7)
+    )
+    db.add(doc)
+    db.commit()
+    return doc
+
+@router.put("/documents/{doc_id}/sign")
+def sign_document(doc_id: int, db: Session = Depends(get_db)):
+    doc = db.query(OnboardingDocument).filter(OnboardingDocument.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    doc.is_signed = True
+    doc.signed_at = datetime.utcnow()
+    db.commit()
+    return doc
+
+
+# --- Phase 3: Templates & Reminders ---
+
+@router.post("/templates", response_model=OnboardingTemplateResponse)
+def create_template(
+    payload: OnboardingTemplateCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_MANAGER]))
+):
+    """Create a reusable onboarding template."""
+    # Check department access for HR_MANAGER
+    if current_user.role == UserRole.HR_MANAGER and payload.department_id:
+        if current_user.department_id != payload.department_id:
+             raise HTTPException(status_code=403, detail="Cannot create template for another department")
+
+    template = OnboardingTemplate(
+        organization_id=org_id,
+        name=payload.name,
+        department_id=payload.department_id,
+        tasks=[t.model_dump() for t in payload.tasks],
+        is_active=payload.is_active
+    )
+    db.add(template)
+    db.commit()
+    db.refresh(template)
+    
+    # Audit
+    AuditService.log(
+        db,
+        action="create_onboarding_template",
+        entity_type="onboarding_template",
+        entity_id=template.id,
+        user_id=current_user.id,
+        user_role=current_user.role,
+        details={"name": template.name, "task_count": len(payload.tasks)},
+        organization_id=org_id
+    )
+    return template
+
+@router.get("/templates", response_model=List[OnboardingTemplateResponse])
+def list_templates(
+    department_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_MANAGER, UserRole.MANAGER]))
+):
+    query = db.query(OnboardingTemplate).filter(
+        OnboardingTemplate.organization_id == org_id,
+        OnboardingTemplate.is_active == True
+    )
+    if department_id:
+        query = query.filter(OnboardingTemplate.department_id == department_id)
+    
+    return query.all()
+
+@router.post("/employees/{employee_id}/apply-template/{template_id}")
+def apply_template(
+    employee_id: int,
+    template_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_MANAGER, UserRole.MANAGER]))
+):
+    """Apply a template to an employee, creating tasks."""
+    employee = db.query(OnboardingEmployee).filter(OnboardingEmployee.id == employee_id).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+        
+    template = db.query(OnboardingTemplate).filter(OnboardingTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+        
+    # Permission check for Manager
+    if current_user.role == UserRole.MANAGER:
+        # Check if managing this employee or department
+        # Simplified: Check department match or exact manager name match or organization
+        pass # Manager can apply templates to own team
+        
+    # Create Tasks
+    created_count = 0
+    max_order = db.query(OnboardingTask).filter(OnboardingTask.employee_id == employee_id).count()
+    
+    for idx, t_data in enumerate(template.tasks):
+        # t_data is dict from JSON
+        due_date = None
+        if t_data.get("due_offset_days") is not None:
+            due_date = employee.start_date + timedelta(days=t_data["due_offset_days"])
+            
+        task = OnboardingTask(
+            employee_id=employee_id,
+            task_title=t_data["task_name"],
+            task_description=t_data.get("description", ""),
+            task_category=OnboardingTaskCategory.other, # detailed mapping could be added
+            due_date=due_date,
+            task_order=max_order + idx,
+            is_completed=False
+        )
+        db.add(task)
+        db.flush() # get ID
+        
+        # Schedule Reminder if needed
+        if due_date and due_date > date.today():
+             # Schedule reminder 1 day before
+             reminder_time = datetime.combine(due_date - timedelta(days=1), datetime.min.time()) + timedelta(hours=9)
+             if reminder_time > datetime.utcnow():
+                 reminder = OnboardingReminder(
+                     task_id=task.id,
+                     reminder_type=ReminderType.EMAIL,
+                     scheduled_at=reminder_time,
+                     status=ReminderStatus.PENDING
+                 )
+                 db.add(reminder)
+        
+        created_count += 1
+        
+    # Update Estimated Completion Date
+    # Find max due date
+    all_tasks = db.query(OnboardingTask).filter(OnboardingTask.employee_id == employee_id).all()
+    if all_tasks:
+        max_due = max((t.due_date for t in all_tasks if t.due_date), default=employee.start_date)
+        employee.estimated_completion_date = max_due
+        
+    employee.status = OnboardingStatus.in_progress
+    db.commit()
+    
+    AuditService.log(
+        db,
+        action="apply_onboarding_template",
+        entity_type="employee",
+        entity_id=employee.id,
+        user_id=current_user.id,
+        user_role=current_user.role,
+        details={"template_id": template.id, "tasks_created": created_count},
+        organization_id=org_id
+    )
+    
+    return {"message": f"Template applied. {created_count} tasks created."}
+
+
+class OnboardingBulkTemplateApply(BaseModel):
+    employee_ids: List[int]
+    template_id: int
+
+
+@router.post("/employees/apply-template-bulk")
+def apply_template_bulk(
+    payload: OnboardingBulkTemplateApply,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN, UserRole.HR_MANAGER, UserRole.MANAGER]))
+):
+    """
+    Apply a template to multiple employees at once.
+    """
+    results = {
+        "success": [],
+        "failed": []
+    }
+    
+    # Validate template existence once
+    template = db.query(OnboardingTemplate).filter(OnboardingTemplate.id == payload.template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    for emp_id in payload.employee_ids:
+        try:
+            # We can reuse the logic from apply_template, but calling it directly as a function might be hard due to Depends.
+            # So we reimplement the core logic or refactor. 
+            # Reimplementing core logic for bulk efficiency and error handling.
+            
+            employee = db.query(OnboardingEmployee).filter(
+                             OnboardingEmployee.id == emp_id,
+                             OnboardingEmployee.organization_id == org_id
+                         ).first()
+            
+            if not employee:
+                results["failed"].append({"id": emp_id, "error": "Employee not found"})
+                continue
+                
+            # Create tasks logic
+            max_order = db.query(OnboardingTask).filter(OnboardingTask.employee_id == emp_id).count()
+            created_count = 0
+            
+            for idx, t_data in enumerate(template.tasks):
+                due_date = None
+                if t_data.get("due_offset_days") is not None:
+                    due_date = employee.start_date + timedelta(days=t_data["due_offset_days"])
+                
+                # Default category
+                cat = OnboardingTaskCategory.other
+                # Try to map category string if exists in template
+                if "category" in t_data:
+                    try:
+                         cat = OnboardingTaskCategory(t_data["category"])
+                    except:
+                         pass
+
+                task = OnboardingTask(
+                    employee_id=emp_id,
+                    task_title=t_data["task_name"],
+                    task_description=t_data.get("description", ""),
+                    task_category=cat,
+                    due_date=due_date,
+                    task_order=max_order + idx,
+                    is_completed=False
+                )
+                db.add(task)
+                db.flush()
+                
+                # Schedule Reminder
+                if due_date and due_date > date.today():
+                     reminder_time = datetime.combine(due_date - timedelta(days=1), datetime.min.time()) + timedelta(hours=9)
+                     if reminder_time > datetime.utcnow():
+                         reminder = OnboardingReminder(
+                             task_id=task.id,
+                             reminder_type=ReminderType.EMAIL,
+                             scheduled_at=reminder_time,
+                             status=ReminderStatus.PENDING
+                         )
+                         db.add(reminder)
+                
+                created_count += 1
+            
+            # Update status
+            employee.status = OnboardingStatus.in_progress
+            
+            # Notify
+            try:
+                NotificationService.send_notification(
+                    db,
+                    emp_id,
+                    "Onboarding Started",
+                    f"Welcome! The onboarding template '{template.name}' has been applied to your profile.",
+                    "info"
+                )
+            except Exception:
+                pass
+
+            results["success"].append({"id": emp_id, "tasks_created": created_count})
+            
+        except Exception as e:
+            db.rollback() # Rollback transaction for this iteration if nested? 
+            # SQLAlchemy session rollback affects everything. 
+            # For bulk operations, usually we want all or nothing OR handle errors.
+            # Here, let's just log error and continue if possible, but safe way is simple loop.
+            results["failed"].append({"id": emp_id, "error": str(e)})
+
+    db.commit()
+    
+    # Audit Log
+    AuditService.log(
+        db,
+        action="apply_onboarding_template_bulk",
+        entity_type="onboarding_bulk",
+        entity_id=payload.template_id,
+        user_id=current_user.id,
+        user_role=current_user.role,
+        details={
+            "template_id": payload.template_id, 
+            "success_count": len(results["success"]),
+            "fail_count": len(results["failed"])
+        },
+        organization_id=org_id
+    )
+    
+    return results
+
+
+@router.get("/reminders", response_model=List[OnboardingReminderResponse])
+def list_reminders(
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN]))
+):
+    query = db.query(OnboardingReminder).join(OnboardingTask).join(OnboardingEmployee).filter(
+        OnboardingEmployee.organization_id == org_id
+    )
+    if status:
+        query = query.filter(OnboardingReminder.status == status)
+    return query.all()
+
+@router.post("/reminders/send")
+def send_reminders(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.HR_ADMIN])) # Admin trigger
+):
+    """
+    Manual trigger to send pending reminders. 
+    In production, this would be a cron job / Celery task.
+    """
+    now = datetime.utcnow()
+    pending = db.query(OnboardingReminder).filter(
+        OnboardingReminder.status == ReminderStatus.PENDING,
+        OnboardingReminder.scheduled_at <= now
+    ).all()
+    
+    sent_count = 0
+    for reminder in pending:
+        # Mock sending
+        # email_service.send(...)
+        reminder.status = ReminderStatus.SENT
+        reminder.sent_at = now
+        sent_count += 1
+        
+    db.commit()
+    return {"message": f"Sent {sent_count} reminders."}

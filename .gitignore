@@ -1,8 +1,19 @@
-node_modules/ 
-.next/ 
-database.db 
-uploads/ 
-.env 
-__pycache__/ 
-venv/ 
-"*.db" 
+# Node / Next.js
+node_modules/
+.next/
+
+# Environment
+.env
+
+# Backend Python
+__pycache__/
+venv/
+*.pyc
+*.pyo
+
+# Database
+database.db
+*.db
+
+# Uploads / media
+uploads/

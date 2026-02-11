@@ -2,18 +2,21 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import type { OnboardingEmployee, OnboardingProgress, OnboardingTask } from '@/lib/api'
+import type { OnboardingEmployee, OnboardingProgress, OnboardingTask, TrustedAIResponse } from '@/lib/api'
 import {
   deleteOnboardingEmployee,
   generateOnboardingChecklist,
   getOnboardingEmployee,
   getOnboardingProgress,
   getOnboardingTasks,
+  ApiError,
 } from '@/lib/api'
 import { TaskChecklist } from '@/components/onboarding/TaskChecklist'
 import { OnboardingChat } from '@/components/onboarding/OnboardingChat'
 import { TipsCard } from '@/components/onboarding/TipsCard'
 import { ProgressAnalytics } from '@/components/onboarding/ProgressAnalytics'
+import TrustedAIOutput from '@/components/TrustedAIOutput'
+import { ErrorDisplay } from '@/lib/error-utils'
 
 type Tab = 'checklist' | 'chat' | 'tips' | 'analytics'
 
@@ -29,6 +32,7 @@ export default function OnboardingEmployeeDetailPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [generating, setGenerating] = useState(false)
+  const [generationResponse, setGenerationResponse] = useState<TrustedAIResponse<OnboardingTask[]> | null>(null)
 
   async function loadAll() {
     if (!employeeId || Number.isNaN(employeeId)) return
@@ -43,8 +47,8 @@ export default function OnboardingEmployeeDetailPage() {
       setEmployee(e)
       setTasks(t)
       setProgress(p)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load employee')
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : (e.message || 'Failed to load employee'))
     } finally {
       setLoading(false)
     }
@@ -61,9 +65,13 @@ export default function OnboardingEmployeeDetailPage() {
     if (!employee) return
     if (!confirm('Generate a new AI checklist? This will replace existing tasks.')) return
     setGenerating(true)
+    setGenerationResponse(null)
     try {
-      await generateOnboardingChecklist(employee.id)
+      const response = await generateOnboardingChecklist(employee.id)
+      setGenerationResponse(response)
       await loadAll()
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : (e.message || 'Generation failed'))
     } finally {
       setGenerating(false)
     }
@@ -81,7 +89,7 @@ export default function OnboardingEmployeeDetailPage() {
       <div className="max-w-7xl mx-auto">
         <div className="bg-white rounded-xl shadow p-6 mb-6">
           {loading && <div className="text-sm text-gray-600">Loading…</div>}
-          {error && <div className="text-sm text-red-600">{error}</div>}
+          <ErrorDisplay errors={error} className="mb-4" />
           {employee && (
             <div className="flex flex-col gap-4">
               <div className="flex flex-wrap items-start justify-between gap-4">
@@ -166,9 +174,18 @@ export default function OnboardingEmployeeDetailPage() {
 
         {employee && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2">
+            <div className="lg:col-span-2 space-y-4">
               {tab === 'checklist' && (
-                <TaskChecklist employeeId={employee.id} tasks={tasks} onChanged={loadAll} />
+                <>
+                  {generationResponse && (
+                    <TrustedAIOutput
+                      response={generationResponse}
+                      title="AI Onboarding Plan"
+                      className="mb-4 text-sm"
+                    />
+                  )}
+                  <TaskChecklist employeeId={employee.id} tasks={tasks} onChanged={loadAll} />
+                </>
               )}
               {tab === 'chat' && <OnboardingChat employeeId={employee.id} />}
               {tab === 'analytics' && <ProgressAnalytics progress={progress} tasks={tasks} />}

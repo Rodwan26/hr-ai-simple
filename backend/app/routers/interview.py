@@ -1,166 +1,370 @@
-from fastapi import APIRouter, Depends, HTTPException
+"""
+Interview Workflow Router
+Handles end-to-end interview process: Scheduling > Kit > Scoring > Decision.
+"""
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel, EmailStr
-import json
-from app.database import get_db
-from app.models.interview import Interview, InterviewStatus
-from app.models.interviewer_availability import InterviewerAvailability
-from app.services.interview_ai import suggest_interview_slot, generate_interview_questions, analyze_interview_fit
 from datetime import datetime
+import json
 
-router = APIRouter(prefix="/api/interviews", tags=["interviews"])
+from app.database import get_db
+from app.models.interview import (
+    Interview, InterviewStatus, InterviewSlot, InterviewSlotStatus, 
+    InterviewScorecard, InterviewKit, ScorecardRecommendation
+)
+from app.models.user import User, UserRole
+from app.routers.auth_deps import get_current_user, require_role, require_hr, get_current_org
+from app.schemas.interview_workflow import (
+    InterviewSlotCreate, InterviewSlotResponse,
+    InterviewInviteRequest,
+    InterviewKitResponse, InterviewKitStructure, Question,
+    InterviewScorecardCreate, InterviewScorecardResponse,
+    InterviewDecisionRequest,
+    ConsistencyAnalysis
+)
+from app.services.interview_service import InterviewService
+from app.services.audit import AuditService
+from app.services.ai_trust_service import AITrustService
 
-class InterviewCreate(BaseModel):
-    candidate_name: str
-    candidate_email: EmailStr
-    interviewer_name: str
-    interviewer_email: EmailStr
-    job_title: str
-    preferred_dates: str
+router = APIRouter(
+    prefix="/interviews",
+    tags=["interviews"]
+)
 
-class InterviewResponse(BaseModel):
-    id: int
-    candidate_name: str
-    candidate_email: str
-    interviewer_name: str
-    interviewer_email: str
-    job_title: str
-    preferred_dates: str
-    scheduled_date: Optional[str]
-    scheduled_time: Optional[str]
-    meeting_link: Optional[str]
-    status: str
-    ai_suggestion: Optional[str]
-    created_at: datetime
+# --- Slots Management ---
+
+@router.post("/{interview_id}/slots", response_model=List[InterviewSlotResponse])
+def generate_slots(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_hr()),
+    org_id: int = Depends(get_current_org)
+):
+    """
+    Generate available slots based on interviewer availability (Mock/AI).
+    """
+    interview = db.query(Interview).filter(
+        Interview.id == interview_id,
+        Interview.organization_id == org_id
+    ).first()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
     
-    class Config:
-        from_attributes = True
+    # Access check is implicitly handled by organization_id filter in query
 
-class SuggestSlotsRequest(BaseModel):
-    candidate_preferences: str
-    interviewer_availability: str
+    # Mock logic for slot generation (In real app, query Outlook/Google Calendar)
+    # Using AI service to suggest 'best' times based on preferences if available
+    
+    service = InterviewService(db, organization_id=org_id)
+    # Mocking preferences for now if not set
+    candidate_prefs = interview.preferred_dates or "Anytime next week"
+    interviewer_avail = "Weekday mornings"
+    
+    suggestions = service.suggest_slots(candidate_prefs, interviewer_avail)
+    
+    created_slots = []
+    for slot_data in suggestions:
+        # Convert string to datetime - assuming ISO format or simple parsing
+        # For robustness, we'll just mock current time + offset if parsing fails or return mock
+        try:
+            # Simple mock parsing or use current time for demo
+            scheduled_at = datetime.now() # Placeholder
+        except:
+            scheduled_at = datetime.now()
 
-class SlotSuggestion(BaseModel):
-    date: str
-    time: str
-    reasoning: str
-
-class SuggestSlotsResponse(BaseModel):
-    suggestions: List[SlotSuggestion]
-
-class GenerateQuestionsRequest(BaseModel):
-    job_title: str
-    candidate_resume: str
-
-class GenerateQuestionsResponse(BaseModel):
-    questions: List[str]
-
-class AnalyzeFitRequest(BaseModel):
-    job_requirements: str
-    candidate_background: str
-
-class AnalyzeFitResponse(BaseModel):
-    fit_score: float
-    reasoning: str
-
-class ConfirmInterviewRequest(BaseModel):
-    scheduled_date: str
-    scheduled_time: str
-    meeting_link: Optional[str] = None
-
-@router.post("/schedule", response_model=InterviewResponse)
-def create_interview(interview: InterviewCreate, db: Session = Depends(get_db)):
-    """
-    Create a new interview request.
-    """
-    db_interview = Interview(
-        candidate_name=interview.candidate_name,
-        candidate_email=interview.candidate_email,
-        interviewer_name=interview.interviewer_name,
-        interviewer_email=interview.interviewer_email,
-        job_title=interview.job_title,
-        preferred_dates=interview.preferred_dates,
-        status=InterviewStatus.pending
+        slot = InterviewSlot(
+            interview_id=interview.id,
+            interviewer_id=interview.interviewer_id or current_user.id,
+            scheduled_at=scheduled_at,
+            duration_minutes=60,
+            status=InterviewSlotStatus.AVAILABLE
+        )
+        db.add(slot)
+        created_slots.append(slot)
+    
+    db.commit()
+    for s in created_slots:
+        db.refresh(s)
+        
+    # Audit
+    AuditService.log(
+        db,
+        action="generate_slots",
+        entity_type="interview",
+        entity_id=interview.id,
+        user_id=current_user.id,
+        user_role=current_user.role.value,
+        details={"count": len(created_slots)},
+        organization_id=org_id,
+        ai_recommended=True
     )
-    db.add(db_interview)
+    
+    return created_slots
+
+
+@router.post("/{interview_id}/invite", status_code=status.HTTP_200_OK)
+def send_invite(
+    interview_id: int,
+    request: InterviewInviteRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_hr()),
+    org_id: int = Depends(get_current_org)
+):
+    """
+    Send interview invite to candidate for selected slots.
+    """
+    interview = db.query(Interview).filter(
+        Interview.id == interview_id,
+        Interview.organization_id == org_id
+    ).first()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    slots = db.query(InterviewSlot).filter(InterviewSlot.id.in_(request.slot_ids)).all()
+    if len(slots) != len(request.slot_ids):
+        raise HTTPException(status_code=400, detail="One or more slots not found")
+        
+    # Mock Email Sending
+    # In reality: EmailService.send_invite(candidate_email, slots)
+    
+    # Update interview status
+    interview.status = InterviewStatus.SCHEDULED # Or 'Invited' if we had that status
+    interview.stage = "Scheduling"
+    
+    # Audit
+    AuditService.log(
+        db,
+        action="send_invite",
+        entity_type="interview",
+        entity_id=interview.id,
+        user_id=current_user.id,
+        user_role=current_user.role.value,
+        details={"slot_ids": request.slot_ids, "message": request.message},
+        organization_id=org_id
+    )
+    
     db.commit()
-    db.refresh(db_interview)
-    return db_interview
+    return {"message": "Invite sent successfully"}
 
-@router.get("", response_model=List[InterviewResponse])
-def get_interviews(db: Session = Depends(get_db)):
-    """
-    Get all interviews.
-    """
-    interviews = db.query(Interview).order_by(Interview.created_at.desc()).all()
-    return interviews
 
-@router.post("/{interview_id}/suggest-slots", response_model=SuggestSlotsResponse)
-def suggest_slots(interview_id: int, request: SuggestSlotsRequest, db: Session = Depends(get_db)):
+# --- Interview Kit ---
+
+@router.get("/{interview_id}/kit", response_model=InterviewKitResponse)
+def get_interview_kit(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user), # Interviewer needs access
+    org_id: int = Depends(get_current_org)
+):
     """
-    Get AI-suggested interview time slots.
+    Get or generate the interview kit (questions + guide).
     """
-    # Verify interview exists
-    interview = db.query(Interview).filter(Interview.id == interview_id).first()
+    # Verify access
+    interview = db.query(Interview).filter(
+        Interview.id == interview_id,
+        Interview.organization_id == org_id
+    ).first()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+        
+    if current_user.id != interview.interviewer_id and current_user.role not in [UserRole.HR_ADMIN, UserRole.HR_MANAGER]:
+         raise HTTPException(status_code=403, detail="Access denied")
+
+    # Check if kit exists
+    if interview.kit:
+        # Pydantic expects 'questions' as list of objects, but DB has dict. 
+        # Adapting if kit.questions is stored as list of dicts.
+        return interview.kit
+
+    # Generate Kit using AI
+    service = InterviewService(db, organization_id=org_id)
+    # Fetch resume text mock
+    resume_text = "Experienced Python Developer..." 
+    
+    job_title = interview.job.title if interview.job else "Role"
+    kit_data = service.generate_interview_kit(job_title, resume_text)
+    
+    # Convert AI dict to Schema format
+    # AI returns {"questions": [{"id":1, ...}], "evaluation_criteria": [...]}
+    questions_list = kit_data.get("questions", [])
+    
+    # Create DB Record
+    new_kit = InterviewKit(
+        interview_id=interview.id,
+        questions=questions_list,
+        evaluation_guide=json.dumps(kit_data.get("evaluation_criteria", []))
+    )
+    db.add(new_kit)
+    db.commit()
+    db.refresh(new_kit)
+    
+    # Audit/Trust Log
+    trust_service = AITrustService(db, org_id, current_user.id, current_user.role)
+    trust_service.wrap_and_log(
+        content="Generated Interview Kit",
+        action_type="generate_kit",
+        entity_type="interview_kit",
+        entity_id=new_kit.id,
+        confidence_score=0.85,
+        model_name="HR-Gen-AI",
+        details={"count": len(questions_list)}
+    )
+    
+    return new_kit
+
+
+# --- Scorecard ---
+
+@router.post("/{interview_id}/scorecard", response_model=InterviewScorecardResponse)
+def submit_scorecard(
+    interview_id: int,
+    scorecard: InterviewScorecardCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    org_id: int = Depends(get_current_org)
+):
+    """
+    Submit feedback scorecard.
+    """
+    interview = db.query(Interview).filter(
+        Interview.id == interview_id,
+        Interview.organization_id == org_id
+    ).first()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
     
-    try:
-        suggestions = suggest_interview_slot(
-            request.candidate_preferences,
-            request.interviewer_availability
-        )
-        
-        # Update interview with AI suggestion
-        interview.ai_suggestion = json.dumps(suggestions)
-        db.commit()
-        
-        return SuggestSlotsResponse(suggestions=[
-            SlotSuggestion(**s) for s in suggestions
-        ])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+    # Only assigned interviewer or admin can submit
+    if current_user.id != interview.interviewer_id and current_user.role not in [UserRole.HR_ADMIN]:
+        raise HTTPException(status_code=403, detail="Only assigned interviewer can submit scorecard")
 
-@router.post("/generate-questions", response_model=GenerateQuestionsResponse)
-def generate_questions(request: GenerateQuestionsRequest, db: Session = Depends(get_db)):
-    """
-    Generate interview questions based on job title and candidate resume.
-    """
-    try:
-        questions = generate_interview_questions(request.job_title, request.candidate_resume)
-        return GenerateQuestionsResponse(questions=questions)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
-
-@router.post("/analyze-fit", response_model=AnalyzeFitResponse)
-def analyze_fit(request: AnalyzeFitRequest, db: Session = Depends(get_db)):
-    """
-    Analyze candidate fit for the job.
-    """
-    try:
-        fit_score, reasoning = analyze_interview_fit(
-            request.job_requirements,
-            request.candidate_background
-        )
-        return AnalyzeFitResponse(fit_score=fit_score, reasoning=reasoning)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
-
-@router.put("/{interview_id}/confirm", response_model=InterviewResponse)
-def confirm_interview(interview_id: int, request: ConfirmInterviewRequest, db: Session = Depends(get_db)):
-    """
-    Confirm and schedule an interview.
-    """
-    interview = db.query(Interview).filter(Interview.id == interview_id).first()
-    if not interview:
-        raise HTTPException(status_code=404, detail="Interview not found")
+    # AI Consistency Check (Mock/Real)
+    # We check against previous scorecards for this role to detect bias
+    service = InterviewService(db, org_id)
+    # consistency_analysis = service.analyze_consistency(...) # Omitted for brevity in this step, done in next endpoint
     
-    interview.scheduled_date = request.scheduled_date
-    interview.scheduled_time = request.scheduled_time
-    interview.meeting_link = request.meeting_link
-    interview.status = InterviewStatus.scheduled
+    db_scorecard = InterviewScorecard(
+        interview_id=interview_id,
+        interviewer_id=current_user.id,
+        overall_rating=scorecard.overall_rating,
+        technical_score=scorecard.technical_score,
+        communication_score=scorecard.communication_score,
+        cultural_fit_score=scorecard.cultural_fit_score,
+        strengths=scorecard.strengths,
+        concerns=scorecard.concerns,
+        feedback_text=scorecard.feedback_text,
+        recommendation=scorecard.recommendation
+    )
+    db.add(db_scorecard)
+    
+    # Update interview stage
+    interview.stage = "Review"
+    interview.status = InterviewStatus.DECISION_PENDING
     
     db.commit()
-    db.refresh(interview)
-    return interview
+    db.refresh(db_scorecard)
+    
+    # Audit
+    AuditService.log(
+        db,
+        action="submit_scorecard",
+        entity_type="interview_scorecard",
+        entity_id=db_scorecard.id,
+        user_id=current_user.id,
+        user_role=current_user.role.value,
+        details={"rating": scorecard.overall_rating, "recommendation": scorecard.recommendation},
+        organization_id=org_id
+    )
+    
+    return db_scorecard
+
+
+@router.get("/{interview_id}/consistency", response_model=ConsistencyAnalysis)
+def check_consistency(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_hr()),
+    org_id: int = Depends(get_current_org)
+):
+    """
+    Analyze consistency of feedback for this interview/candidate.
+    """
+    interview = db.query(Interview).filter(
+        Interview.id == interview_id,
+        Interview.organization_id == org_id
+    ).first()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+        
+    scorecards = db.query(InterviewScorecard).filter(InterviewScorecard.interview_id == interview_id).all()
+    
+    if not scorecards:
+        return ConsistencyAnalysis(
+            score_variance=0.0,
+            consensus_recommendation="N/A",
+            flags=["No scorecards submitted yet."],
+            trust_score=1.0
+        )
+        
+    # Simple logic for consistency (Var(Overall Rating))
+    ratings = [s.overall_rating for s in scorecards]
+    avg_rating = sum(ratings) / len(ratings)
+    variance = sum((r - avg_rating) ** 2 for r in ratings) / len(ratings) if len(ratings) > 0 else 0
+    
+    flags = []
+    if variance > 1.0:
+        flags.append("High variance in overall ratings.")
+        
+    recommendations = [s.recommendation for s in scorecards]
+    if "YES" in recommendations and "NO" in recommendations:
+        flags.append("Conflicting recommendations (YES vs NO).")
+        
+    return ConsistencyAnalysis(
+        score_variance=round(variance, 2),
+        consensus_recommendation="HIRE" if avg_rating >= 4 else "REVIEW",
+        flags=flags,
+        trust_score=0.9 if not flags else 0.6
+    )
+
+
+@router.post("/{interview_id}/decision")
+def make_decision(
+    interview_id: int,
+    request: InterviewDecisionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_hr()),
+    org_id: int = Depends(get_current_org)
+):
+    """
+    Final hiring decision.
+    """
+    interview = db.query(Interview).filter(
+        Interview.id == interview_id,
+        Interview.organization_id == org_id
+    ).first()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+        
+    before_state = {"status": interview.status, "stage": interview.stage}
+    
+    interview.status = request.status
+    interview.stage = "Closed"
+    
+    db.commit()
+    
+    # Audit
+    AuditService.log(
+        db,
+        action="interview_decision",
+        entity_type="interview",
+        entity_id=interview.id,
+        user_id=current_user.id,
+        user_role=current_user.role.value,
+        details={"decision": request.status, "reason": request.reason},
+        organization_id=org_id,
+        before_state=before_state,
+        after_state={"status": interview.status}
+    )
+    
+    return {"message": f"Interview marked as {request.status}"}

@@ -8,8 +8,14 @@ import {
     askPayrollQuestion,
     explainPayslip,
     Payroll,
-    SalaryComponent
-} from '../../lib/api';
+    SalaryComponent,
+    TrustedAIResponse,
+    lockPayroll,
+    validateAllPayroll,
+    downloadAllPayslips
+} from '@/lib/api';
+import { LockClosedIcon } from '@heroicons/react/24/outline';
+import TrustedAIOutput from '@/components/TrustedAIOutput';
 
 export default function PayrollPage() {
     const [employeeId, setEmployeeId] = useState('emp001');
@@ -25,13 +31,14 @@ export default function PayrollPage() {
 
     // AI Chat
     const [question, setQuestion] = useState('');
-    const [aiAnswer, setAiAnswer] = useState('');
+    const [aiAnswer, setAiAnswer] = useState<TrustedAIResponse<{ answer: string }> | null>(null);
     const [askingAi, setAskingAi] = useState(false);
     const [explaining, setExplaining] = useState(false);
-    const [explanation, setExplanation] = useState('');
+    const [explanation, setExplanation] = useState<TrustedAIResponse<{ explanation: string }> | null>(null);
 
     useEffect(() => {
         fetchHistory();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [employeeId]);
 
     const fetchHistory = async () => {
@@ -51,10 +58,20 @@ export default function PayrollPage() {
         try {
             await calculatePayroll(employeeId, month, year, baseSalary);
             await fetchHistory();
-        } catch (e) {
-            alert('Calculation failed');
+        } catch (e: any) {
+            alert(e.message || 'Calculation failed');
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleLock = async () => {
+        if (!confirm(`Are you sure you want to lock payroll for ${month}/${year}? This cannot be undone.`)) return;
+        try {
+            const res = await lockPayroll(month, year);
+            alert(res.message);
+        } catch (e: any) {
+            alert(e.message || 'Failed to lock payroll');
         }
     };
 
@@ -63,7 +80,7 @@ export default function PayrollPage() {
             const data = await getPayrollDetails(id);
             setSelectedPayroll(data.payroll);
             setComponents(data.components);
-            setExplanation(''); // Reset explanation on new selection
+            setExplanation(null); // Reset explanation on new selection
         } catch (e) {
             console.error(e);
         }
@@ -75,7 +92,7 @@ export default function PayrollPage() {
         try {
             const context = selectedPayroll ? `Current viewing payslip for ${selectedPayroll.month}/${selectedPayroll.year} with net salary ${selectedPayroll.net_salary}` : '';
             const res = await askPayrollQuestion(question, context);
-            setAiAnswer(res.answer);
+            setAiAnswer(res);
         } catch (e) {
             console.error(e);
         } finally {
@@ -88,11 +105,40 @@ export default function PayrollPage() {
         setExplaining(true);
         try {
             const res = await explainPayslip(selectedPayroll.id);
-            setExplanation(res.explanation);
+            setExplanation(res);
         } catch (e) {
             console.error(e);
         } finally {
             setExplaining(false);
+        }
+    };
+
+    const [validating, setValidating] = useState(false);
+    const [validationResults, setValidationResults] = useState<any>(null);
+
+    const handleValidateAll = async () => {
+        setValidating(true);
+        setValidationResults(null);
+        try {
+            const res = await validateAllPayroll(month, year);
+            setValidationResults(res);
+            if (res.valid) {
+                alert("All employees passed validation!");
+            } else {
+                alert(`Validation failed for ${res.errors.length} employees.`);
+            }
+        } catch (e: any) {
+            alert(e.message || 'Validation failed');
+        } finally {
+            setValidating(false);
+        }
+    };
+
+    const handleDownloadAll = async () => {
+        try {
+            await downloadAllPayslips(month, year);
+        } catch (e: any) {
+            alert(e.message || 'Download failed');
         }
     };
 
@@ -105,6 +151,7 @@ export default function PayrollPage() {
                 <div className="bg-white shadow rounded-lg p-6 mb-8">
                     <h2 className="text-lg font-medium mb-4">Payroll Configuration</h2>
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                        {/* ... (existing inputs) ... */}
                         <div>
                             <label className="block text-sm font-medium text-gray-700">Employee ID</label>
                             <input
@@ -141,17 +188,64 @@ export default function PayrollPage() {
                                 />
                             </div>
                         </div>
+                        <div className="flex space-x-2">
+                            <button
+                                onClick={handleCalculate}
+                                disabled={loading}
+                                className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400"
+                            >
+                                {loading ? 'Processing...' : 'Run Payroll'}
+                            </button>
+                            <button
+                                onClick={handleLock}
+                                className="bg-slate-800 text-white px-4 py-2 rounded-md hover:bg-slate-900 flex items-center justify-center"
+                                title="Lock this period"
+                            >
+                                <LockClosedIcon className="w-4 h-4" />
+                            </button>
+                        </div>
+                    </div>
+                    {/* Bulk Actions */}
+                    <div className="mt-4 flex space-x-4 border-t pt-4">
                         <button
-                            onClick={handleCalculate}
-                            disabled={loading}
-                            className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400"
+                            onClick={handleValidateAll}
+                            disabled={validating}
+                            className="bg-yellow-600 text-white px-4 py-2 rounded-md hover:bg-yellow-700 disabled:bg-gray-400"
                         >
-                            {loading ? 'Processing...' : 'Run Payroll'}
+                            {validating ? 'Validating...' : 'Validate All Prereqs'}
+                        </button>
+                        <button
+                            onClick={handleDownloadAll}
+                            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"
+                        >
+                            Download All Payslips (ZIP)
                         </button>
                     </div>
+
+                    {validationResults && !validationResults.valid && (
+                        <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-md">
+                            <h3 className="font-bold text-red-800">Validation Errors</h3>
+                            <ul className="list-disc pl-5 text-red-700">
+                                {validationResults.errors.map((err: any, idx: number) => (
+                                    <li key={idx}>Emp #{err.employee_id} ({err.name}): {err.error}</li>
+                                ))}
+                            </ul>
+                            {validationResults.warnings.length > 0 && (
+                                <div className="mt-2">
+                                    <h3 className="font-bold text-yellow-800">Warnings</h3>
+                                    <ul className="list-disc pl-5 text-yellow-700">
+                                        {validationResults.warnings.map((warn: any, idx: number) => (
+                                            <li key={idx}>Emp #{warn.employee_id} ({warn.name}): {warn.warning}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* ... (rest of the component) ... */}
                     {/* Left: History List */}
                     <div className="lg:col-span-1 bg-white shadow rounded-lg p-6">
                         <h2 className="text-lg font-medium mb-4">Payslip History</h2>
@@ -194,12 +288,11 @@ export default function PayrollPage() {
                                     </div>
 
                                     {explanation && (
-                                        <div className="mb-6 bg-indigo-50 p-4 rounded-lg text-sm text-indigo-800 border border-indigo-100">
-                                            <h4 className="font-bold mb-2 flex items-center">
-                                                <span className="mr-2">🤖</span> AI Analysis
-                                            </h4>
-                                            <p className="whitespace-pre-line">{explanation}</p>
-                                        </div>
+                                        <TrustedAIOutput
+                                            response={explanation}
+                                            title="AI Payslip Analysis"
+                                            className="mb-6"
+                                        />
                                     )}
 
                                     <div className="space-y-4">
@@ -256,8 +349,8 @@ export default function PayrollPage() {
                                         </button>
                                     </div>
                                     {aiAnswer && (
-                                        <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                                            <p className="text-sm text-gray-700">{aiAnswer}</p>
+                                        <div className="mt-4">
+                                            <TrustedAIOutput response={aiAnswer} title="AI Answer" />
                                         </div>
                                     )}
                                 </div>

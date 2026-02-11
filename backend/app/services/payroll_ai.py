@@ -150,3 +150,21 @@ class PayrollAIService:
             }
         ]
         return call_openrouter(messages)
+
+    def calculate_bulk_payroll(self, db: Session, month: int, year: int, organization_id: int) -> List[Payroll]:
+        """
+        Process payroll for all active employees within a specific organization.
+        """
+        from app.models.employee import Employee
+        # Security: Only select employees from the requester's organization
+        employees = db.query(Employee).filter(
+            Employee.organization_id == organization_id
+        ).all()
+        
+        results = []
+        for emp in employees:
+            # TODO: Fetch base salary from Employee contract/profile instead of hardcoded
+            base = 5000.0 
+            payroll = self.calculate_payroll(db, str(emp.id), month, year, base)
+            results.append(payroll)
+        return results

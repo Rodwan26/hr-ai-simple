@@ -23,5 +23,19 @@ class Payroll(Base):
     payment_date = Column(DateTime, nullable=True)
     status = Column(String, default=PayrollStatus.DRAFT)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True) # Ensure multi-tenancy
 
     components = relationship("SalaryComponent", back_populates="payroll", cascade="all, delete-orphan")
+
+class PayrollLock(Base):
+    __tablename__ = "payroll_locks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    month = Column(Integer, nullable=False)
+    year = Column(Integer, nullable=False)
+    locked_by_user_id = Column(Integer, nullable=True)
+    locked_at = Column(DateTime(timezone=True), server_default=func.now())
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    
+    # Unique constraint typically: (month, year, organization_id)
+    # But for now, we just check existence.

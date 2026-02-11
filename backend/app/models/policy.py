@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text
+from sqlalchemy import Column, Integer, String, Text, ForeignKey
 from app.database import Base
 
 class Policy(Base):
@@ -8,3 +8,5 @@ class Policy(Base):
     title = Column(String, index=True)
     content = Column(Text)
     category = Column(String)
+    
+    organization_id = Column(Integer, ForeignKey("organizations.id"), index=True)

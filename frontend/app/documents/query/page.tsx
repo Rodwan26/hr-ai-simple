@@ -5,15 +5,15 @@ import {
   queryDocuments,
   getDocuments,
   Document,
-  DocumentQueryResponse,
+  TrustedAIResponse
 } from '@/lib/api';
+import TrustedAIOutput from '@/components/TrustedAIOutput';
 
 interface Message {
   id: number;
   question: string;
-  answer: string;
-  sources: DocumentQueryResponse['sources'];
-  confidence: number;
+  response: TrustedAIResponse | null;
+  isError?: boolean;
   timestamp: Date;
 }
 
@@ -23,7 +23,6 @@ export default function DocumentQueryPage() {
   const [loading, setLoading] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selectedDocuments, setSelectedDocuments] = useState<number[]>([]);
-  const [showSources, setShowSources] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,9 +57,7 @@ export default function DocumentQueryPage() {
     const userMessage: Message = {
       id: Date.now(),
       question: userQuestion,
-      answer: '',
-      sources: [],
-      confidence: 0,
+      response: null,
       timestamp: new Date(),
     };
     setMessages((prev) => [...prev, userMessage]);
@@ -72,16 +69,14 @@ export default function DocumentQueryPage() {
         selectedDocuments.length > 0 ? selectedDocuments : undefined
       );
 
-      // Update message with answer
+      // Update message with AI response
       setMessages((prev) => {
         const updated = [...prev];
         const lastIndex = updated.length - 1;
         if (lastIndex >= 0) {
           updated[lastIndex] = {
             ...updated[lastIndex],
-            answer: result.answer,
-            sources: result.sources,
-            confidence: result.confidence,
+            response: result,
           };
         }
         return updated;
@@ -94,8 +89,8 @@ export default function DocumentQueryPage() {
         if (lastIndex >= 0) {
           updated[lastIndex] = {
             ...updated[lastIndex],
-            answer: 'Error: Failed to get answer. Please try again.',
-            confidence: 0,
+            isError: true,
+            response: null
           };
         }
         return updated;
@@ -109,18 +104,6 @@ export default function DocumentQueryPage() {
     setSelectedDocuments((prev) =>
       prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
     );
-  };
-
-  const getConfidenceColor = (confidence: number) => {
-    if (confidence >= 0.7) return 'text-green-600 bg-green-50';
-    if (confidence >= 0.4) return 'text-yellow-600 bg-yellow-50';
-    return 'text-red-600 bg-red-50';
-  };
-
-  const getConfidenceLabel = (confidence: number) => {
-    if (confidence >= 0.7) return 'High';
-    if (confidence >= 0.4) return 'Medium';
-    return 'Low';
   };
 
   return (
@@ -174,7 +157,7 @@ export default function DocumentQueryPage() {
           <div className="lg:col-span-3">
             <div className="bg-white rounded-lg shadow-xl p-6 flex flex-col" style={{ height: '600px' }}>
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto mb-4 space-y-4">
+              <div className="flex-1 overflow-y-auto mb-4 space-y-4 pr-2">
                 {messages.length === 0 ? (
                   <div className="text-center text-gray-500 py-8">
                     <p className="text-lg mb-2">Start asking questions about your documents</p>
@@ -185,70 +168,37 @@ export default function DocumentQueryPage() {
                     <div key={message.id} className="space-y-3">
                       {/* User Question */}
                       <div className="flex justify-end">
-                        <div className="bg-blue-600 text-white rounded-lg px-4 py-2 max-w-3xl">
-                          <p className="font-semibold mb-1">You</p>
+                        <div className="bg-blue-600 text-white rounded-lg px-4 py-2 max-w-3xl shadow-sm">
+                          <p className="font-semibold mb-1 text-xs uppercase tracking-wider opacity-75">You</p>
                           <p>{message.question}</p>
                         </div>
                       </div>
 
                       {/* AI Answer */}
-                      {message.answer && (
-                        <div className="flex justify-start">
-                          <div className="bg-gray-100 rounded-lg px-4 py-2 max-w-3xl">
-                            <div className="flex items-center justify-between mb-2">
-                              <p className="font-semibold text-gray-800">AI Assistant</p>
-                              <div
-                                className={`px-2 py-1 rounded text-xs font-semibold ${getConfidenceColor(
-                                  message.confidence
-                                )}`}
-                              >
-                                {getConfidenceLabel(message.confidence)} Confidence
-                              </div>
-                            </div>
-                            <p className="text-gray-700 whitespace-pre-wrap mb-3">{message.answer}</p>
-
-                            {/* Sources */}
-                            {message.sources.length > 0 && (
-                              <div className="mt-3 pt-3 border-t border-gray-300">
-                                <button
-                                  onClick={() =>
-                                    setShowSources(showSources === message.id ? null : message.id)
-                                  }
-                                  className="text-sm text-blue-600 hover:text-blue-700 font-semibold"
-                                >
-                                  {showSources === message.id ? 'Hide' : 'Show'} Sources (
-                                  {message.sources.length})
-                                </button>
-                                {showSources === message.id && (
-                                  <div className="mt-2 space-y-2">
-                                    {message.sources.map((source, idx) => (
-                                      <div
-                                        key={idx}
-                                        className="bg-white rounded p-2 border border-gray-200"
-                                      >
-                                        <p className="text-xs font-semibold text-gray-800">
-                                          {source.filename}
-                                        </p>
-                                        <p className="text-xs text-gray-600">
-                                          Chunk #{source.chunk_index + 1} • Similarity:{' '}
-                                          {(source.similarity * 100).toFixed(1)}%
-                                        </p>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                      {message.response ? (
+                        <div className="flex justify-start w-full">
+                          <div className="max-w-3xl w-full">
+                            <TrustedAIOutput
+                              response={message.response}
+                              title="AI Assistant"
+                              className="shadow-sm border-blue-100"
+                            />
                           </div>
                         </div>
-                      )}
+                      ) : message.isError ? (
+                        <div className="flex justify-start">
+                          <div className="bg-red-50 text-red-700 rounded-lg px-4 py-3 max-w-3xl border border-red-200">
+                            <p>Error: Failed to get answer. Please try again.</p>
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   ))
                 )}
                 {loading && (
                   <div className="flex justify-start">
-                    <div className="bg-gray-100 rounded-lg px-4 py-2">
-                      <p className="text-gray-600">Thinking...</p>
+                    <div className="bg-gray-50 rounded-lg px-4 py-2 border border-gray-100 animate-pulse">
+                      <p className="text-gray-500 text-sm">Thinking...</p>
                     </div>
                   </div>
                 )}
@@ -262,13 +212,14 @@ export default function DocumentQueryPage() {
                     value={question}
                     onChange={(e) => setQuestion(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && e.ctrlKey) {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
                         handleQuery();
                       }
                     }}
-                    placeholder="Ask a question about your documents... (Ctrl+Enter to send)"
+                    placeholder="Ask a question about your documents... (Enter to send)"
                     className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-                    rows={3}
+                    rows={2}
                     disabled={loading}
                   />
                   <button

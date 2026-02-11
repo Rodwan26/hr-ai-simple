@@ -1,44 +1,81 @@
 # HR AI Platform
 
-A minimal HR AI Platform using OpenRouter API with the `liquid/lfm-2.5-1.2b-thinking:free` model.
+A comprehensive HR AI Platform featuring **9 intelligent modules** to streamline human resources operations. Built with Next.js, FastAPI, and OpenRouter AI.
 
 ## Features
 
 ### 1. Help Desk AI
-- Ask questions about company policies
-- Get AI-powered answers based on policy context
-- View ticket history
-- Manage policies (create, list, delete)
+- Instant answers to company policy questions
+- AI-powered ticket resolution assistance
+- Policy management and versioning
+- Smart context retrieval from knowledge base
 
 ### 2. Resume Screening AI
-- Create job postings with requirements
-- Submit resumes for analysis
-- Get AI-generated scores (0-100) and detailed feedback
+- Automated resume parsing and scoring (0-100)
+- Detailed AI feedback on candidate qualifications
+- Job requirement matching
+- Bulk processing capabilities
 
 ### 3. Risk Detection AI
-- Analyze employee activities for potential risks
-- Detect toxic language in text
-- Get risk level assessments (low/medium/high)
+- Real-time analysis of communication for toxicity
+- Behavioral risk assessment (low/medium/high)
+- Early warning system for compliance issues
+- Detailed risk reasoning and evidence
 
 ### 4. Interview Scheduling AI
-- Schedule interviews with candidate and interviewer info
-- AI-suggested time slots with reasoning
-- Generate interview questions based on job and candidate
-- Analyze candidate fit for positions
+- Intelligent scheduling with conflict resolution
+- AI-suggested optimal time slots
+- Automated interview question generation
+- Candidate fit analysis based on resume and requirements
 
 ### 5. Document Upload & RAG System
-- Upload company documents (PDF, DOCX, TXT, CSV)
-- Intelligent document chunking and embedding
-- Semantic search with hybrid search (semantic + keyword)
-- AI-powered Q&A about documents with source citations
-- Confidence scores for answers
+- Enterprise-grade Document Management System
+- Support for PDF, DOCX, TXT, CSV formats
+- **Hybrid Search**: Combines semantic vector search with keyword matching
+- Intelligent chunking and embedding for precise information retrieval
+- Source citations for every AI answer
+
+### 6. Onboarding AI (New)
+- **Automated Checklists**: Dynamic task generation for new hires
+- **AI Assistant**: 24/7 onboarding support chat
+- **Progress Tracking**: Real-time status dashboards for HR and managers
+- **Personalized Tips**: AI-driven success suggestions based on role
+
+### 7. Leave Management AI (New)
+- **Smart Requests**: Policy-aware leave submission
+- **Balance Tracking**: Automated accrual and usage monitoring
+- **AI Approval Support**: Recommendations for approval/rejection based on team capacity and policy
+- **Eligibility Checks**: Instant validation of leave rules
+
+### 8. Payroll AI (New)
+- **Automated Calculation**: Salary, tax, and deduction processing
+- **Payslip Generation**: Detailed breakdown of earnings
+- **AI Explanations**: "Explain my payslip" feature for employees
+- **History & Analytics**: Comprehensive payroll records
+
+### 9. Burnout Detection AI (New)
+- **Wellness Monitoring**: Tracks key performance and engagement metrics
+- **Risk Assessment**: Identifies early signs of employee burnout
+- **Proactive Recommendations**: AI-suggested interventions
+- **Dashboard**: Visual trends and health indicators
 
 ## Tech Stack
 
-- **Backend**: Python 3.11 + FastAPI
-- **Frontend**: Next.js 14 + TypeScript + Tailwind CSS
-- **AI**: OpenRouter API (liquid/lfm-2.5-1.2b-thinking:free)
-- **Database**: SQLite
+- **Frontend**: 
+  - Next.js 14 (React Framework)
+  - TypeScript
+  - Tailwind CSS for styling
+  - Recharts for data visualization
+- **Backend**: 
+  - Python 3.11+
+  - FastAPI (High-performance web framework)
+  - SQLAlchemy & Pydantic
+- **AI & ML**: 
+  - OpenRouter API (Access to Liquid LFM, GPT-4, Claude, etc.)
+  - Vector Embeddings for RAG
+- **Database**: 
+  - SQLite (Default/Dev)
+  - PostgreSQL (Production ready)
 
 ## Setup
 
@@ -49,10 +86,13 @@ A minimal HR AI Platform using OpenRouter API with the `liquid/lfm-2.5-1.2b-thin
 cd backend
 ```
 
-2. Create virtual environment (optional but recommended):
+2. Create virtual environment (recommended):
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Windows
+venv\Scripts\activate
+# Mac/Linux
+source venv/bin/activate
 ```
 
 3. Install dependencies:
@@ -60,14 +100,15 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. The `.env` file is already configured with the API key. The database will be created automatically on first run.
+4. Configure Environment:
+   - Ensure `.env` contains your `OPENROUTER_API_KEY`
+   - Review `DATABASE_URL` if using PostgreSQL
 
 5. Run the server:
 ```bash
 uvicorn app.main:app --reload
 ```
-
-The API will be available at `http://localhost:8000`
+API runs at `http://localhost:8000`
 
 ### Frontend
 
@@ -81,110 +122,88 @@ cd frontend
 npm install
 ```
 
-3. Run the development server:
+3. Run development server:
 ```bash
 npm run dev
 ```
-
-The frontend will be available at `http://localhost:3000`
+Frontend runs at `http://localhost:3000`
 
 ## API Endpoints
 
 ### Help Desk
-- `POST /api/helpdesk/ask` - Ask a question
-- `GET /api/helpdesk/tickets` - Get all tickets
-- `POST /api/helpdesk/policies` - Create a policy
-- `GET /api/helpdesk/policies` - Get all policies
-- `DELETE /api/helpdesk/policies/{id}` - Delete a policy
+- `POST /api/helpdesk/ask` - Ask policy question
+- `GET /api/helpdesk/tickets` - List tickets
+- `POST /api/helpdesk/policies` - Manage policies
 
 ### Resume Screening
-- `POST /api/jobs` - Create a job
-- `GET /api/jobs` - Get all jobs
-- `POST /api/jobs/{id}/resumes` - Submit a resume
-- `GET /api/jobs/{id}/resumes` - Get resumes for a job
+- `POST /api/jobs` - Create job posting
+- `POST /api/jobs/{id}/resumes` - Submit & analyze resume
+- `GET /api/jobs` - List jobs
 
-### Risk Detection
-- `POST /api/risk/analyze/{employee_id}` - Analyze employee risk
-- `POST /api/risk/check-text` - Check text for toxicity
+### Risk & Burnout
+- `POST /api/risk/analyze/{employee_id}` - Analyze behavioral risk
+- `POST /api/risk/check-text` - Toxicity check
+- `POST /api/burnout/analyze/{employee_id}` - comprehensive burnout assessment
+- `GET /api/burnout/dashboard/{employee_id}` - Get wellness metrics
 
-### Interview Scheduling
-- `POST /api/interviews/schedule` - Create interview request
-- `GET /api/interviews` - List all interviews
-- `POST /api/interviews/{id}/suggest-slots` - AI suggests time slots
-- `POST /api/interviews/generate-questions` - Generate interview questions
-- `POST /api/interviews/analyze-fit` - Analyze candidate fit
-- `PUT /api/interviews/{id}/confirm` - Confirm scheduled interview
+### Interview Management
+- `POST /api/interviews/schedule` - Schedule interview
+- `POST /api/interviews/generate-questions` - Generate tailored questions
+- `POST /api/interviews/analyze-fit` - Candidate fit scoring
 
-### Document Management & RAG
-- `POST /api/documents/upload` - Upload company document
-- `GET /api/documents` - List company documents
-- `POST /api/documents/query` - Ask question about documents
-- `DELETE /api/documents/{id}` - Delete document
-- `GET /api/documents/{id}/chunks` - View document chunks
+### Onboarding
+- `POST /api/onboarding/employees` - Register new hire
+- `POST /api/onboarding/employees/{id}/generate-checklist` - Create tasks
+- `POST /api/onboarding/employees/{id}/ask` - AI Onboarding Assistant
+
+### Leave & Payroll
+- `POST /api/leave/request` - Submit leave request
+- `GET /api/leave/balance/{employee_id}` - Check balance
+- `POST /api/payroll/calculate` - Run payroll
+- `POST /api/payroll/explain` - "Explain this payslip"
+
+### Documents (RAG)
+- `POST /api/documents/upload` - Ingest document
+- `POST /api/documents/query` - Semantic search & Q/A
 
 ## Project Structure
 
 ```
-backend/
-├── app/
-│   ├── main.py
-│   ├── database.py
-│   ├── models/
-│   │   ├── policy.py
-│   │   ├── ticket.py
-│   │   ├── job.py
-│   │   ├── resume.py
-│   │   ├── employee.py
-│   │   ├── activity.py
-│   │   ├── interview.py
-│   │   ├── interviewer_availability.py
-│   │   ├── company.py
-│   │   ├── document.py
-│   │   ├── document_chunk.py
-│   │   └── embedding_cache.py
-│   ├── services/
-│   │   ├── openrouter_client.py
-│   │   ├── helpdesk_ai.py
-│   │   ├── resume_ai.py
-│   │   ├── risk_ai.py
-│   │   ├── interview_ai.py
-│   │   ├── document_ai.py
-│   │   └── embedding_service.py
-│   └── routers/
-│       ├── helpdesk.py
-│       ├── resume.py
-│       ├── risk.py
-│       ├── interview.py
-│       └── documents.py
-├── requirements.txt
-├── .env
-├── uploads/ (auto-created)
-└── database.db (auto-created)
-
-frontend/
-├── app/
-│   ├── page.tsx (Help Desk)
-│   ├── resumes/page.tsx
-│   ├── risk/page.tsx
-│   ├── interviews/page.tsx
-│   ├── documents/
-│   │   ├── page.tsx
-│   │   └── query/page.tsx
-│   ├── layout.tsx
-│   └── globals.css
-├── lib/
-│   └── api.ts
-└── package.json
+hr-ai-platform/
+├── backend/
+│   ├── app/
+│   │   ├── models/          # Database models
+│   │   ├── routers/         # API endpoints (9 modules)
+│   │   │   ├── onboarding.py
+│   │   │   ├── leave.py
+│   │   │   ├── payroll.py
+│   │   │   ├── burnout.py
+│   │   │   └── ... (others)
+│   │   ├── services/        # AI logic & Business logic
+│   │   │   ├── onboarding_ai.py
+│   │   │   ├── leave_ai.py
+│   │   │   ├── payroll_ai.py
+│   │   │   ├── burnout_ai.py
+│   │   │   └── ... (others)
+│   │   ├── main.py          # App entry point
+│   │   └── database.py      # DB Config
+│   ├── requirements.txt
+│   └── database.db          # SQLite DB
+│
+└── frontend/
+    ├── app/                 # Next.js Pages
+    │   ├── onboarding/
+    │   ├── leave/
+    │   ├── payroll/
+    │   ├── burnout/
+    │   └── ... (others)
+    ├── lib/
+    │   └── api.ts           # Type-safe API client
+    └── public/
 ```
 
 ## Notes
 
-- The SQLite database is automatically created on first run
-- All AI calls use OpenRouter API with the specified model
-- The frontend connects to `http://localhost:8000` by default
-- CORS is configured to allow requests from `http://localhost:3000`
-- Documents are stored in `backend/uploads/{company_id}/`
-- Supports both SQLite (default) and PostgreSQL (set `DATABASE_URL` env var)
-- Document embeddings are cached for performance
-- File upload limit: 50MB per file
-- Supported file types: PDF, DOCX, TXT, CSV
+- **Authentication**: The platform is currently designed for demonstration/internal use with open access.
+- **File Uploads**: Supports files up to 50MB.
+- **AI Models**: Configurable via OpenRouter. Default is `liquid/lfm-2.5-1.2b-thinking:free`.

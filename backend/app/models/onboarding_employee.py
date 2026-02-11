@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Date, DateTime, Enum as SQLEnum, ForeignKey
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 import enum
 from app.database import Base
 
@@ -22,6 +23,12 @@ class OnboardingEmployee(Base):
     manager_name = Column(String, nullable=True)
     status = Column(SQLEnum(OnboardingStatus), default=OnboardingStatus.pending, index=True)
     completion_percentage = Column(Integer, default=0)
-    company_id = Column(Integer, ForeignKey("companies.id"), index=True)
+    estimated_completion_date = Column(Date, nullable=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    organization = relationship("Organization", back_populates="onboarding_employees")
+    tasks = relationship("OnboardingTask", back_populates="employee", cascade="all, delete-orphan")
+
 

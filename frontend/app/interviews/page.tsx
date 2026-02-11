@@ -8,9 +8,17 @@ import {
   generateQuestions,
   analyzeFit,
   confirmInterview,
+  generateInterviewKit,
+  getInterviewKit,
+  submitInterviewFeedback,
+  getInterviewAnalysis,
   Interview,
   SlotSuggestion,
+  InterviewKit,
+  InterviewFeedback,
+  TrustedAIResponse,
 } from '@/lib/api';
+import TrustedAIOutput from '@/components/TrustedAIOutput';
 
 export default function InterviewsPage() {
   const [interviews, setInterviews] = useState<Interview[]>([]);
@@ -28,12 +36,17 @@ export default function InterviewsPage() {
 
   // AI features state
   const [selectedInterview, setSelectedInterview] = useState<Interview | null>(null);
-  const [suggestedSlots, setSuggestedSlots] = useState<SlotSuggestion[]>([]);
-  const [questions, setQuestions] = useState<string[]>([]);
-  const [fitScore, setFitScore] = useState<number | null>(null);
-  const [fitReasoning, setFitReasoning] = useState('');
+  const [schedulesResponse, setSchedulesResponse] = useState<TrustedAIResponse<{ suggestions: SlotSuggestion[] }> | null>(null);
+  const [questionsResponse, setQuestionsResponse] = useState<TrustedAIResponse<{ questions: string[] }> | null>(null);
+  const [fitResponse, setFitResponse] = useState<TrustedAIResponse<{ fit_score: number; reasoning: string }> | null>(null);
   const [candidateResume, setCandidateResume] = useState('');
   const [jobRequirements, setJobRequirements] = useState('');
+  const [activeKit, setActiveKit] = useState<InterviewKit | null>(null);
+  const [showFeedbackForm, setShowFeedbackForm] = useState(false);
+  const [feedbackScores, setFeedbackScores] = useState<Record<number, number>>({});
+  const [feedbackComments, setFeedbackComments] = useState('');
+  const [analysisData, setAnalysisData] = useState<any>(null);
+  const [showAnalysis, setShowAnalysis] = useState(false);
 
   useEffect(() => {
     loadInterviews();
@@ -89,7 +102,7 @@ export default function InterviewsPage() {
     setLoading(true);
     try {
       const result = await suggestSlots(interview.id, interview.preferred_dates, interviewerAvailability);
-      setSuggestedSlots(result.suggestions);
+      setSchedulesResponse(result);
       setSelectedInterview(interview);
     } catch (error) {
       console.error('Error suggesting slots:', error);
@@ -103,7 +116,7 @@ export default function InterviewsPage() {
     setLoading(true);
     try {
       await confirmInterview(interview.id, slot.date, slot.time);
-      setSuggestedSlots([]);
+      setSchedulesResponse(null);
       setSelectedInterview(null);
       await loadInterviews();
       alert('Interview confirmed successfully!');
@@ -124,7 +137,7 @@ export default function InterviewsPage() {
     setLoading(true);
     try {
       const result = await generateQuestions(jobTitle, candidateResume);
-      setQuestions(result.questions);
+      setQuestionsResponse(result);
     } catch (error) {
       console.error('Error generating questions:', error);
       alert('Failed to generate questions');
@@ -142,11 +155,71 @@ export default function InterviewsPage() {
     setLoading(true);
     try {
       const result = await analyzeFit(jobRequirements, candidateResume);
-      setFitScore(result.fit_score);
-      setFitReasoning(result.reasoning);
+      setFitResponse(result);
     } catch (error) {
       console.error('Error analyzing fit:', error);
       alert('Failed to analyze fit');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGenerateKit = async (interviewId: number) => {
+    setLoading(true);
+    try {
+      const kit = await generateInterviewKit(interviewId);
+      setActiveKit(kit);
+    } catch (err) {
+      alert('Failed to generate interview kit');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleViewKit = async (interviewId: number) => {
+    try {
+      const kit = await getInterviewKit(interviewId);
+      setActiveKit(kit);
+    } catch (err) {
+      alert('No kit found. Please generate one first.');
+    }
+  };
+
+  const handleSubmitFeedback = async () => {
+    if (!selectedInterview || !activeKit) return;
+
+    setLoading(true);
+    try {
+      const scoresList = Object.values(feedbackScores);
+      const avg = scoresList.length > 0 ? scoresList.reduce((a, b) => a + b, 0) / scoresList.length : 0;
+
+      await submitInterviewFeedback({
+        interview_id: selectedInterview.id,
+        scores: feedbackScores,
+        overall_score: avg,
+        strengths: "AI-summarized strengths placeholder",
+        weaknesses: "AI-summarized weaknesses placeholder",
+        recommendation: avg >= 4 ? 'hire' : avg >= 3 ? 'reconsider' : 'reject',
+        comments: feedbackComments
+      });
+      alert('Feedback submitted!');
+      setActiveKit(null);
+      loadInterviews();
+    } catch (err) {
+      alert('Failed to submit feedback');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleViewAnalysis = async (interviewId: number) => {
+    setLoading(true);
+    try {
+      const analysis = await getInterviewAnalysis(interviewId);
+      setAnalysisData(analysis);
+      setShowAnalysis(true);
+    } catch (err) {
+      alert('Failed to load analysis. Make sure feedback has been submitted.');
     } finally {
       setLoading(false);
     }
@@ -293,14 +366,23 @@ export default function InterviewsPage() {
                 >
                   {loading ? 'Generating...' : 'Generate Questions'}
                 </button>
-                {questions.length > 0 && (
-                  <div className="mt-4 p-3 bg-indigo-50 rounded-lg">
-                    <h3 className="font-semibold text-gray-800 mb-2 text-sm">Generated Questions:</h3>
-                    <ol className="list-decimal list-inside space-y-1 text-sm text-gray-700">
-                      {questions.map((q, i) => (
-                        <li key={i}>{q}</li>
-                      ))}
-                    </ol>
+                {questionsResponse && (
+                  <div className="mt-4">
+                    <TrustedAIOutput
+                      response={questionsResponse}
+                      title="Questions Generated"
+                      showContent={false}
+                    />
+                    {questionsResponse.data && (
+                      <div className="mt-2 p-3 bg-indigo-50 rounded-lg">
+                        <h3 className="font-semibold text-gray-800 mb-2 text-sm">Questions:</h3>
+                        <ol className="list-decimal list-inside space-y-1 text-sm text-gray-700">
+                          {questionsResponse.data.questions.map((q, i) => (
+                            <li key={i}>{q}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -337,13 +419,23 @@ export default function InterviewsPage() {
                 >
                   {loading ? 'Analyzing...' : 'Analyze Fit'}
                 </button>
-                {fitScore !== null && (
-                  <div className={`mt-4 p-3 rounded-lg ${getFitScoreColor(fitScore)}`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-semibold">Fit Score</span>
-                      <span className="text-2xl font-bold">{fitScore.toFixed(1)}/100</span>
-                    </div>
-                    <p className="text-sm mt-2">{fitReasoning}</p>
+                {fitResponse && (
+                  <div className="mt-4">
+                    <TrustedAIOutput
+                      response={fitResponse}
+                      title="Fit Analysis"
+                      showContent={false}
+                    />
+                    {fitResponse.data && (
+                      <div className={`mt-2 p-3 rounded-lg ${getFitScoreColor(fitResponse.data.fit_score)}`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-semibold">Fit Score</span>
+                          <span className="text-2xl font-bold">{fitResponse.data.fit_score.toFixed(1)}/100</span>
+                        </div>
+                        <p className="text-sm mt-2 font-medium">Analysis:</p>
+                        <p className="text-sm">{fitResponse.data.reasoning}</p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -354,7 +446,7 @@ export default function InterviewsPage() {
           <div className="lg:col-span-2">
             <div className="bg-white rounded-lg shadow-xl p-6">
               <h2 className="text-xl font-bold text-gray-800 mb-4">Scheduled Interviews</h2>
-              
+
               {/* Interviewer Availability Input */}
               <div className="mb-4 p-4 bg-gray-50 rounded-lg">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -393,55 +485,97 @@ export default function InterviewsPage() {
                           <p className="text-sm font-semibold text-gray-800">
                             Scheduled: {interview.scheduled_date} at {interview.scheduled_time}
                           </p>
-                          {interview.meeting_link && (
-                            <a
-                              href={interview.meeting_link}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-sm text-indigo-600 hover:underline"
+                          <div className="flex gap-2 mt-2">
+                            {interview.meeting_link && (
+                              <a
+                                href={interview.meeting_link}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-3 py-1 bg-white text-indigo-600 border border-indigo-200 rounded text-xs font-semibold hover:bg-indigo-50"
+                              >
+                                Join Meeting
+                              </a>
+                            )}
+                            <button
+                              onClick={() => { setSelectedInterview(interview); handleViewKit(interview.id); }}
+                              className="px-3 py-1 bg-indigo-600 text-white rounded text-xs font-semibold hover:bg-indigo-700"
                             >
-                              Meeting Link
-                            </a>
-                          )}
+                              Open Kit / Score
+                            </button>
+                          </div>
+                        </div>
+                      ) : interview.status === 'completed' ? (
+                        <div className="mb-3 p-3 bg-blue-50 rounded-lg flex justify-between items-center">
+                          <p className="text-sm font-semibold text-blue-800">Interview Completed</p>
+                          <button
+                            onClick={() => handleViewAnalysis(interview.id)}
+                            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-bold shadow-sm"
+                          >
+                            View AI Analysis
+                          </button>
                         </div>
                       ) : (
                         <div className="mb-3">
                           <p className="text-sm text-gray-600 mb-2">
                             Preferred: {interview.preferred_dates}
                           </p>
-                          <button
-                            onClick={() => handleSuggestSlots(interview)}
-                            disabled={loading || !interviewerAvailability.trim()}
-                            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 text-sm"
-                          >
-                            {loading ? 'Loading...' : 'Get AI Suggestions'}
-                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleSuggestSlots(interview)}
+                              disabled={loading || !interviewerAvailability.trim()}
+                              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 text-sm"
+                            >
+                              {loading ? 'Loading...' : 'Get AI Suggestions'}
+                            </button>
+                            <button
+                              onClick={() => { setSelectedInterview(interview); handleGenerateKit(interview.id); }}
+                              disabled={loading}
+                              className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:bg-gray-400 text-sm"
+                            >
+                              Generate Kit
+                            </button>
+                            <button
+                              onClick={() => { setSelectedInterview(interview); handleViewKit(interview.id); }}
+                              disabled={loading}
+                              className="px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 disabled:bg-gray-400 text-sm"
+                            >
+                              View Kit / Scoring
+                            </button>
+                          </div>
                         </div>
                       )}
 
-                      {selectedInterview?.id === interview.id && suggestedSlots.length > 0 && (
-                        <div className="mt-4 p-4 bg-indigo-50 rounded-lg">
-                          <h4 className="font-semibold text-gray-800 mb-3 text-sm">AI Suggested Time Slots:</h4>
-                          <div className="space-y-3">
-                            {suggestedSlots.map((slot, idx) => (
-                              <div key={idx} className="bg-white p-3 rounded-lg border border-indigo-200">
-                                <div className="flex justify-between items-start mb-2">
-                                  <div>
-                                    <p className="font-semibold text-gray-800 text-sm">
-                                      {slot.date} at {slot.time}
-                                    </p>
-                                    <p className="text-xs text-gray-600 mt-1">{slot.reasoning}</p>
+                      {selectedInterview?.id === interview.id && schedulesResponse && schedulesResponse.data && (
+                        <div className="mt-4">
+                          <TrustedAIOutput
+                            response={schedulesResponse}
+                            title="Scheduling AI"
+                            showContent={false}
+                            className="mb-2"
+                          />
+                          <div className="p-4 bg-indigo-50 rounded-lg">
+                            <h4 className="font-semibold text-gray-800 mb-3 text-sm">Suggested Slots:</h4>
+                            <div className="space-y-3">
+                              {schedulesResponse.data.suggestions.map((slot, idx) => (
+                                <div key={idx} className="bg-white p-3 rounded-lg border border-indigo-200">
+                                  <div className="flex justify-between items-start mb-2">
+                                    <div>
+                                      <p className="font-semibold text-gray-800 text-sm">
+                                        {slot.date} at {slot.time}
+                                      </p>
+                                      <p className="text-xs text-gray-600 mt-1">{slot.reasoning}</p>
+                                    </div>
+                                    <button
+                                      onClick={() => handleConfirmSlot(interview, slot)}
+                                      disabled={loading}
+                                      className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 disabled:bg-gray-400"
+                                    >
+                                      Confirm
+                                    </button>
                                   </div>
-                                  <button
-                                    onClick={() => handleConfirmSlot(interview, slot)}
-                                    disabled={loading}
-                                    className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 disabled:bg-gray-400"
-                                  >
-                                    Confirm
-                                  </button>
                                 </div>
-                              </div>
-                            ))}
+                              ))}
+                            </div>
                           </div>
                         </div>
                       )}
@@ -453,6 +587,126 @@ export default function InterviewsPage() {
           </div>
         </div>
       </div>
+
+      {/* Phase 5: Interview Kit & Feedback Modal Overlay */}
+      {activeKit && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl">
+            <div className="flex justify-between items-start mb-6">
+              <div>
+                <h2 className="text-2xl font-bold text-slate-900">Interview Kit: {activeKit.job_title}</h2>
+                <p className="text-slate-500">Structured evaluation for the candidate</p>
+              </div>
+              <button onClick={() => setActiveKit(null)} className="text-slate-400 hover:text-slate-600 font-bold text-xl">×</button>
+            </div>
+
+            <div className="space-y-8">
+              {activeKit.questions.map((q) => (
+                <div key={q.id} className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                  <p className="font-semibold text-slate-800 mb-2">{q.text}</p>
+                  <p className="text-sm text-slate-500 mb-4 italic">Look for: {q.criteria}</p>
+                  <div className="flex gap-4">
+                    {[1, 2, 3, 4, 5].map((score) => (
+                      <button
+                        key={score}
+                        onClick={() => setFeedbackScores({ ...feedbackScores, [q.id]: score })}
+                        className={`h-10 w-10 rounded-lg flex items-center justify-center font-bold transition-all ${feedbackScores[q.id] === score
+                          ? 'bg-indigo-600 text-white shadow-lg scale-110'
+                          : 'bg-white text-slate-400 border border-slate-200 hover:border-indigo-300'
+                          }`}
+                      >
+                        {score}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Interviewer Overall Comments</label>
+                <textarea
+                  value={feedbackComments}
+                  onChange={(e) => setFeedbackComments(e.target.value)}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500"
+                  rows={4}
+                  placeholder="Provide detailed feedback on the candidate's performance..."
+                />
+              </div>
+
+              <button
+                onClick={handleSubmitFeedback}
+                disabled={loading}
+                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 shadow-lg transition-all"
+              >
+                {loading ? 'Submitting...' : 'Submit Final Feedback'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Phase 5: Interview Analysis Modal */}
+      {showAnalysis && analysisData && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-8 shadow-2xl">
+            <div className="flex justify-between items-start mb-6">
+              <div>
+                <h2 className="text-2xl font-bold text-slate-900">AI Post-Interview Analysis</h2>
+                <p className="text-slate-500">Consistency, Risks, and Hiring Recommendation</p>
+              </div>
+              <button onClick={() => setShowAnalysis(false)} className="text-slate-400 hover:text-slate-600 font-bold text-xl">×</button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+              <div className="p-6 bg-indigo-50 rounded-2xl border border-indigo-100 flex flex-col items-center justify-center">
+                <span className="text-sm text-indigo-600 font-bold uppercase tracking-wider mb-2">Consistency Score</span>
+                <div className="text-4xl font-black text-indigo-900">{(analysisData.consistency_score * 100).toFixed(0)}%</div>
+              </div>
+              <div className="p-6 bg-emerald-50 rounded-2xl border border-emerald-100 flex flex-col items-center justify-center">
+                <span className="text-sm text-emerald-600 font-bold uppercase tracking-wider mb-2">Recommendation</span>
+                <div className={`text-xl font-bold ${analysisData.recommendation === 'Reject' ? 'text-red-600' : 'text-emerald-700'}`}>
+                  {analysisData.recommendation}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2">
+                  <span className="h-2 w-2 bg-indigo-500 rounded-full"></span>
+                  AI Executive Summary
+                </h3>
+                <div className="p-4 bg-slate-50 rounded-xl text-slate-700 leading-relaxed border border-slate-100">
+                  {analysisData.summary}
+                </div>
+              </div>
+
+              {analysisData.risks && analysisData.risks.length > 0 && (
+                <div>
+                  <h3 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2">
+                    <span className="h-2 w-2 bg-amber-500 rounded-full"></span>
+                    Identified Risks or Deviations
+                  </h3>
+                  <div className="space-y-2">
+                    {analysisData.risks.map((risk: string, i: number) => (
+                      <div key={i} className="flex gap-3 p-3 bg-amber-50 rounded-lg border border-amber-100 text-amber-800 text-sm">
+                        <span className="font-bold">⚠️</span>
+                        {risk}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={() => setShowAnalysis(false)}
+              className="w-full mt-8 bg-slate-900 text-white py-4 rounded-xl font-bold hover:bg-black transition-all"
+            >
+              Close Analysis
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

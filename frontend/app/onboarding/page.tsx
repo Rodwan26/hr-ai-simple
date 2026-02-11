@@ -1,9 +1,17 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import type { OnboardingEmployee, OnboardingStatus } from '@/lib/api'
-import { createOnboardingEmployee, deleteOnboardingEmployee, listOnboardingEmployees } from '@/lib/api'
+import type { OnboardingEmployee, OnboardingStatus, OnboardingTemplate } from '@/lib/api'
+import {
+  createOnboardingEmployee,
+  deleteOnboardingEmployee,
+  listOnboardingEmployees,
+  listOnboardingTemplates,
+  applyOnboardingTemplateBulk,
+  ApiError
+} from '@/lib/api'
 import { EmployeeCard } from '@/components/onboarding/EmployeeCard'
+import { ErrorDisplay } from '@/lib/error-utils'
 
 export default function OnboardingDashboardPage() {
   const [employees, setEmployees] = useState<OnboardingEmployee[]>([])
@@ -17,6 +25,13 @@ export default function OnboardingDashboardPage() {
   const [showAdd, setShowAdd] = useState(false)
   const [saving, setSaving] = useState(false)
 
+  // Bulk Actions State
+  const [templates, setTemplates] = useState<OnboardingTemplate[]>([])
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('')
+  const [selectedEmployees, setSelectedEmployees] = useState<Set<number>>(new Set())
+  const [bulkApplying, setBulkApplying] = useState(false)
+  const [isSelectionMode, setIsSelectionMode] = useState(false)
+
   // New employee form
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -29,10 +44,14 @@ export default function OnboardingDashboardPage() {
     setLoading(true)
     setError(null)
     try {
-      const data = await listOnboardingEmployees()
-      setEmployees(data)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load employees')
+      const [empData, tmplData] = await Promise.all([
+        listOnboardingEmployees(),
+        listOnboardingTemplates()
+      ])
+      setEmployees(empData)
+      setTemplates(tmplData)
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : (e.message || 'Failed to load data'))
     } finally {
       setLoading(false)
     }
@@ -88,8 +107,36 @@ export default function OnboardingDashboardPage() {
       setStartDate('')
       setManagerName('')
       await load()
+    } catch (e: any) {
+      setError(e instanceof ApiError ? e.errors : (e.message || 'Creation failed'))
     } finally {
       setSaving(false)
+    }
+  }
+
+  const toggleSelection = (id: number, selected: boolean) => {
+    const newSet = new Set(selectedEmployees)
+    if (selected) {
+      newSet.add(id)
+    } else {
+      newSet.delete(id)
+    }
+    setSelectedEmployees(newSet)
+  }
+
+  const handleBulkApply = async () => {
+    if (!selectedTemplate || selectedEmployees.size === 0) return
+    setBulkApplying(true)
+    try {
+      const res = await applyOnboardingTemplateBulk(Number(selectedTemplate), Array.from(selectedEmployees))
+      alert(res.message)
+      setSelectedEmployees(new Set())
+      setIsSelectionMode(false)
+      await load()
+    } catch (e: any) {
+      alert(e.message || 'Bulk apply failed')
+    } finally {
+      setBulkApplying(false)
     }
   }
 
@@ -102,13 +149,49 @@ export default function OnboardingDashboardPage() {
               <h1 className="text-3xl font-bold text-gray-800">Onboarding Assistant</h1>
               <p className="text-gray-600 mt-1">Create onboarding plans, track progress, and answer questions with AI.</p>
             </div>
-            <button
-              onClick={() => setShowAdd(true)}
-              className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700"
-            >
-              + Add New Employee
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setIsSelectionMode(!isSelectionMode)
+                  setSelectedEmployees(new Set())
+                }}
+                className={`px-4 py-2 rounded-lg font-semibold border ${isSelectionMode ? 'bg-indigo-100 border-indigo-500 text-indigo-700' : 'bg-white border-gray-300 text-gray-700'}`}
+              >
+                {isSelectionMode ? 'Cancel Selection' : 'Bulk Actions'}
+              </button>
+              <button
+                onClick={() => setShowAdd(true)}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700"
+              >
+                + Add New Employee
+              </button>
+            </div>
           </div>
+
+          {isSelectionMode && (
+            <div className="mt-4 p-4 bg-indigo-50 rounded-lg border border-indigo-100 flex items-center justify-between flex-wrap gap-4">
+              <div className="flex items-center gap-4">
+                <span className="font-semibold text-indigo-900">{selectedEmployees.size} selected</span>
+                <select
+                  value={selectedTemplate}
+                  onChange={(e) => setSelectedTemplate(e.target.value)}
+                  className="px-3 py-2 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">Select Template...</option>
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={handleBulkApply}
+                disabled={bulkApplying || selectedEmployees.size === 0 || !selectedTemplate}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-gray-400"
+              >
+                {bulkApplying ? 'Applying...' : 'Apply Template to Selected'}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="bg-white rounded-xl shadow p-4 mb-6">
@@ -150,7 +233,7 @@ export default function OnboardingDashboardPage() {
           </div>
         </div>
 
-        {error && <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl mb-6">{error}</div>}
+        <ErrorDisplay errors={error} className="mb-6" />
 
         {loading ? (
           <div className="text-gray-600 text-center py-10">Loading onboarding employees…</div>
@@ -162,7 +245,13 @@ export default function OnboardingDashboardPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filtered.map((e) => (
-              <EmployeeCard key={e.id} employee={e} onDelete={onDelete} />
+              <EmployeeCard
+                key={e.id}
+                employee={e}
+                onDelete={onDelete}
+                onSelect={isSelectionMode ? toggleSelection : undefined}
+                selected={selectedEmployees.has(e.id)}
+              />
             ))}
           </div>
         )}
